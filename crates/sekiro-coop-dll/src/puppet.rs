@@ -104,6 +104,20 @@ pub fn note_remote_snapshot() {
     *REMOTE_SEEN_AT.lock() = Some(std::time::Instant::now());
 }
 
+/// Remote player's facing from the latest fresh snapshot.
+fn remote_yaw() -> Option<f32> {
+    let fresh = REMOTE_SEEN_AT
+        .lock()
+        .map(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        .unwrap_or(false);
+    if !fresh {
+        return None;
+    }
+    let m = crate::global()?;
+    let snap = m.remote_player.lock().clone()?;
+    Some(snap.yaw).filter(|y| y.is_finite())
+}
+
 fn remote_target() -> Option<[f32; 3]> {
     let fresh = REMOTE_SEEN_AT
         .lock()
@@ -408,7 +422,12 @@ fn hero_rot() -> Option<[f32; 4]> {
     }
 }
 
-/// Puppet rotation: the physics module keeps a quaternion at +0x70.
+/// The Hero's facing in radians (physics +0x70, element 1), for the snapshot.
+pub fn hero_yaw() -> Option<f32> {
+    hero_rot().map(|r| r[1]).filter(|y| y.is_finite())
+}
+
+/// Puppet rotation: the physics module keeps `[0, yaw, 0, 0]` at +0x70.
 unsafe fn rot_of(chr: usize) -> Option<[f32; 4]> {
     let sm = read_ptr(chr + 0x1ff8)?;
     let phys = read_ptr(sm + 0x68)?;
@@ -548,7 +567,14 @@ fn write_step(from_ticker: bool) {
             let yaw = {
                 let mut lt = LAST_TARGET.lock();
                 let mut yg = YAW.lock();
-                if let Some(prev) = *lt {
+                // Network source: the remote player's own facing wins (turns in
+                // place). Otherwise derive it from the movement.
+                let net_yaw = if *SOURCE_NET { remote_yaw() } else { None };
+                if let Some(ny) = net_yaw {
+                    YAW_TARGET.store(wrap_pi(ny + *YAW_OFFSET).to_bits(), Ordering::Relaxed);
+                    HAVE_YAW_TARGET.store(true, Ordering::Relaxed);
+                    *lt = Some([tx, ty, tz]);
+                } else if let Some(prev) = *lt {
                     let (dx, dz) = (tx - prev[0], tz - prev[2]);
                     if dx * dx + dz * dz > 0.15 * 0.15 {
                         YAW_TARGET.store((wrap_pi((-dx).atan2(-dz) + *YAW_OFFSET)).to_bits(), Ordering::Relaxed);
@@ -836,6 +862,8 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         remote_fresh = REMOTE_FRESH_STEPS.load(Ordering::Relaxed),
         remote_stale = REMOTE_STALE_STEPS.load(Ordering::Relaxed),
         remote_pos = ?remote_target(),
+        remote_yaw = ?remote_yaw(),
+        hero_yaw = ?hero_yaw(),
         raw_steps = RAW_STEPS.load(Ordering::Relaxed),
         warp_ms = *WARP_MS,
         warp_refused = WARP_REFUSED.load(Ordering::Relaxed),

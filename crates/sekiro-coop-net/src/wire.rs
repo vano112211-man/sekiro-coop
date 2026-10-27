@@ -121,6 +121,9 @@ pub struct PlayerSnapshot {
     pub position: [f32; 3],
     pub animation_id: u32,
     pub igt_ms: u32,
+    /// Facing, radians, as the game stores it in the physics module
+    /// (`+0x70` = `[0, yaw, 0, 0]`). Lets the remote puppet turn in place.
+    pub yaw: f32,
 }
 
 /// One non-player ChrIns at a given tick.  Identified by `handle`,
