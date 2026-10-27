@@ -535,6 +535,10 @@ static CATALOG: Lazy<Vec<u32>> = Lazy::new(|| {
         .filter_map(|v| v.trim().parse().ok())
         .collect()
 });
+static CATALOG_MS: Lazy<u64> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_CATALOG_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(3000)
+});
+static CATALOG_OK: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static CATALOG_NEXT: AtomicUsize = AtomicUsize::new(0);
 static CATALOG_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
@@ -547,7 +551,7 @@ unsafe fn catalog_step(chr: usize, moving: bool, still_for: std::time::Duration)
     }
     let due = CATALOG_LAST
         .lock()
-        .map(|t| t.elapsed() >= std::time::Duration::from_millis(3000))
+        .map(|t| t.elapsed() >= std::time::Duration::from_millis(*CATALOG_MS))
         .unwrap_or(true);
     if !due {
         return;
@@ -949,6 +953,96 @@ fn mirror_scan(t: Target, root: usize, root_name: &str, label: &str) {
     );
 }
 
+// ---------------------------------------------------------------- hero anim slots
+
+/// The Hero's ChrIns (`[base+player_position]+0x88`).
+fn hero_chr() -> Option<usize> {
+    let m = crate::global()?;
+    let addrs = m.base_addrs.as_ref()?;
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    unsafe { read_ptr(base + addrs.player_position).and_then(|a| read_ptr(a + 0x88)) }
+}
+
+/// Run 22: the snapshot's animation id (`+0x1ff8 → +0x10 → +0x20`) did not
+/// change between the hits of a combo, so attacks play on another slot.
+/// `SEKIRO_COOP_PUPPET_SLOTSCAN=1` watches u32 fields of a few Hero objects
+/// and logs every change of an animation-like value (6+ digits).
+static SLOTSCAN: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_SLOTSCAN").map(|v| v == "1").unwrap_or(false)
+});
+const SLOT_WORDS: usize = 0x400 / 4;
+static SLOT_PREV: Mutex<Vec<Vec<u32>>> = Mutex::new(Vec::new());
+static SLOT_SEEN: Mutex<Vec<(usize, usize, Vec<u32>, u32)>> = Mutex::new(Vec::new());
+static SLOT_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+fn anim_like(v: u32) -> bool {
+    (100_000..=99_999_999).contains(&v)
+}
+
+fn slot_scan(frame: u64) {
+    if !*SLOTSCAN {
+        return;
+    }
+    let Some(chr) = hero_chr() else { return };
+    // Objects: 0 = sm+0x10, 1 = sm+0x28 (animation), 2 = sm+0x58 (anim request),
+    // 3 = chr+0x20 (request slot written by ForcePlayAnimation).
+    let objs: [Option<usize>; 4] = unsafe {
+        let sm = read_ptr(chr + 0x1ff8);
+        [
+            sm.and_then(|sm| read_ptr(sm + 0x10)),
+            sm.and_then(|sm| read_ptr(sm + 0x28)),
+            sm.and_then(|sm| read_ptr(sm + 0x58)),
+            read_ptr(chr + 0x20),
+        ]
+    };
+    let mut prev = SLOT_PREV.lock();
+    if prev.len() != objs.len() {
+        *prev = vec![Vec::new(); objs.len()];
+    }
+    let t_ms = T0.elapsed().as_millis() as u64;
+    for (oi, o) in objs.iter().enumerate() {
+        let Some(o) = *o else { continue };
+        if !readable(o, SLOT_WORDS * 4) {
+            continue;
+        }
+        let cur: Vec<u32> = unsafe {
+            core::slice::from_raw_parts(o as *const u32, SLOT_WORDS).to_vec()
+        };
+        if prev[oi].len() == SLOT_WORDS {
+            for w in 0..SLOT_WORDS {
+                let (a, b) = (prev[oi][w], cur[w]);
+                if a != b && (anim_like(a) || anim_like(b)) {
+                    let mut seen = SLOT_SEEN.lock();
+                    let e = match seen.iter_mut().position(|e| e.0 == oi && e.1 == w * 4) {
+                        Some(i) => &mut seen[i],
+                        None => {
+                            seen.push((oi, w * 4, Vec::new(), 0));
+                            seen.last_mut().unwrap()
+                        }
+                    };
+                    if !e.2.contains(&b) && e.2.len() < 40 {
+                        e.2.push(b);
+                    }
+                    e.3 += 1;
+                    // Counters and timers change every frame: stop logging them.
+                    let noisy = e.3 > 150;
+                    drop(seen);
+                    if !noisy && SLOT_LOGGED.fetch_add(1, Ordering::Relaxed) < 1500 {
+                        tracing::info!(t_ms, obj = oi, off = format!("{:#x}", w * 4), from = a, to = b, "hero slot");
+                    }
+                }
+            }
+        }
+        prev[oi] = cur;
+    }
+    if frame % 600 == 0 {
+        let seen = SLOT_SEEN.lock();
+        for (oi, off, vals, n) in seen.iter() {
+            tracing::info!(obj = oi, off = format!("{off:#x}"), changes = n, values = ?vals, "hero slot summary");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- survey
 
 /// Called from `on_frame` (ticker thread) every frame.
@@ -959,6 +1053,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     let _ = TICKER_TID.set(format!("{:?}", std::thread::current().id()));
     CUR_FRAME.store(frame, Ordering::Relaxed);
     write_step(true);
+    slot_scan(frame);
 
     // Mirror scans: pause writes 2 s after pinning, scan 1 s later ("A"),
     // again 10 s after that ("B") with the same pause, so hits present in
@@ -1003,6 +1098,13 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
             *FORCE_CHECK.lock() = None;
             let now_anim = (*TARGET.lock()).and_then(|t| unsafe { anim_of(t.ptr) });
             tracing::info!(want, puppet_anim = ?now_anim, "puppet forced action check");
+            if now_anim == Some(want) && !CATALOG.is_empty() {
+                let mut ok = CATALOG_OK.lock();
+                if !ok.contains(&want) {
+                    ok.push(want);
+                    tracing::info!(accepted = ?*ok, "puppet catalog accepted so far");
+                }
+            }
         }
     }
     if frame % 60 != 0 {
