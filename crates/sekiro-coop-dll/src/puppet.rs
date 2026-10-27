@@ -157,6 +157,10 @@ static RESET_ANIM: Lazy<bool> = Lazy::new(|| {
 });
 static LAST_RESET_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static ANIM_RESETS: AtomicU64 = AtomicU64::new(0);
+/// Stop detection for the target: last position it moved from and when.
+static MOVE_TRACK: Mutex<Option<([f32; 3], std::time::Instant)>> = Mutex::new(None);
+static TARGET_MOVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STOP_RESETS: AtomicU64 = AtomicU64::new(0);
 static ANIM_RESET_REFUSED: AtomicU64 = AtomicU64::new(0);
 /// Fraction of the remaining distance covered per 8 ms step (net source).
 static SMOOTH: Lazy<f32> = Lazy::new(|| {
@@ -563,6 +567,35 @@ fn write_step(from_ticker: bool) {
             } else {
                 cur[1]
             };
+            // When the target stops, reset the puppet's animation at once so
+            // it does not keep its run cycle until the next 2 s reset (run 17).
+            {
+                let now = std::time::Instant::now();
+                let mut mt = MOVE_TRACK.lock();
+                let moved = match *mt {
+                    Some((p0, _)) => {
+                        let (dx, dz) = (tx - p0[0], tz - p0[2]);
+                        dx * dx + dz * dz > 0.05 * 0.05
+                    }
+                    None => true,
+                };
+                if moved {
+                    *mt = Some(([tx, ty, tz], now));
+                    TARGET_MOVING.store(true, Ordering::Relaxed);
+                } else {
+                    let since = mt.map(|(_, s)| s).unwrap_or(now);
+                    drop(mt);
+                    if TARGET_MOVING.load(Ordering::Relaxed)
+                        && now.duration_since(since) >= std::time::Duration::from_millis(200)
+                    {
+                        TARGET_MOVING.store(false, Ordering::Relaxed);
+                        if *RESET_ANIM && reset_anim(t.ptr) {
+                            STOP_RESETS.fetch_add(1, Ordering::Relaxed);
+                            *LAST_RESET_AT.lock() = Some(now);
+                        }
+                    }
+                }
+            }
             // Yaw from the target's own movement (net) or the Hero's heading.
             let yaw = {
                 let mut lt = LAST_TARGET.lock();
@@ -854,6 +887,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         warps = WARPS.load(Ordering::Relaxed),
         source = if *SOURCE_NET { "net" } else { "offset" },
         anim_resets = ANIM_RESETS.load(Ordering::Relaxed),
+        stop_resets = STOP_RESETS.load(Ordering::Relaxed),
         anim_reset_refused = ANIM_RESET_REFUSED.load(Ordering::Relaxed),
         yaw_deg = ?YAW.lock().map(|y| y.to_degrees()),
         puppet_rot = ?t.and_then(|t| unsafe { rot_of(t.ptr) }),
