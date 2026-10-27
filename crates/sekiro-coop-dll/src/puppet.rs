@@ -608,8 +608,37 @@ static CATALOG_OK: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static CATALOG_NEXT: AtomicUsize = AtomicUsize::new(0);
 static CATALOG_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
+/// FPS test (run 26: 25-30 FPS with the spawned Owl). `SEKIRO_COOP_PUPPET_PHASES=1`
+/// runs, counted from the pin: A 0-40 s normal; B 40-80 s warps only (no raw
+/// position writes); C 80-120 s no position writes at all; D after 120 s normal,
+/// and the catalog (if set) only in D.
+static PHASES: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_PHASES").map(|v| v == "1").unwrap_or(false)
+});
+static PIN_TIME: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static PHASE_LOGGED: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+fn phase() -> char {
+    if !*PHASES {
+        return 'D';
+    }
+    let Some(t) = *PIN_TIME.lock() else { return 'A' };
+    let s = t.elapsed().as_secs();
+    let p = match s {
+        0..=39 => 'A',
+        40..=79 => 'B',
+        80..=119 => 'C',
+        _ => 'D',
+    };
+    let idx = p as usize;
+    if PHASE_LOGGED.swap(idx, Ordering::Relaxed) != idx {
+        tracing::info!(phase = %p, "puppet FPS test phase");
+    }
+    p
+}
+
 unsafe fn catalog_step(chr: usize, moving: bool, still_for: std::time::Duration) {
-    if CATALOG.is_empty() || moving || still_for < std::time::Duration::from_secs(3) {
+    if CATALOG.is_empty() || moving || still_for < std::time::Duration::from_secs(3) || phase() != 'D' {
         return;
     }
     if T0.elapsed() < std::time::Duration::from_secs(15) {
@@ -755,6 +784,10 @@ fn write_step(from_ticker: bool) {
             if due && reset_anim(t.ptr) {
                 *LAST_RESET_AT.lock() = Some(std::time::Instant::now());
             }
+        }
+        let ph = phase();
+        if ph == 'C' {
+            return;
         }
         let Some(p) = phys_pos_addr(t.ptr) else {
             STALE.fetch_add(1, Ordering::Relaxed);
@@ -918,7 +951,7 @@ fn write_step(from_ticker: bool) {
                 remote_action_step(t.ptr);
             }
             let warped = !*MODE_RAW
-                && ((warp_due && moving) || off_by > 2.0)
+                && ((warp_due && (moving || ph == 'B')) || off_by > 2.0)
                 && (*YAW.lock())
                     .map(yaw_rot)
                     .or_else(|| rot_of(t.ptr))
@@ -926,7 +959,7 @@ fn write_step(from_ticker: bool) {
                     .unwrap_or(false);
             if warped {
                 *LAST_WARP_AT.lock() = Some(std::time::Instant::now());
-            } else {
+            } else if ph != 'B' {
                 RawPtr(p).write::<[f32; 3]>(desired);
                 RAW_STEPS.fetch_add(1, Ordering::Relaxed);
             }
@@ -1032,6 +1065,7 @@ fn spawn_step() {
                         *TARGET.lock() = Some(Target { handle, ptr: created, char_id });
                         *LAST_WRITTEN.lock() = None;
                         PINNED_AT.store(CUR_FRAME.load(Ordering::Relaxed), Ordering::Relaxed);
+                        *PIN_TIME.lock() = Some(std::time::Instant::now());
                         // Harmless at once, before its first AI update.
                         logic_off(created);
                         if let Some(team) = *TEAM {
