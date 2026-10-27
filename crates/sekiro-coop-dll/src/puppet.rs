@@ -88,6 +88,33 @@ static MODE_RAW: Lazy<bool> = Lazy::new(|| {
 static WARP_MS: Lazy<u64> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_WARP_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(500)
 });
+/// Where the puppet goes. `offset` (default): `SEKIRO_COOP_PUPPET_OFFSET` m
+/// ahead of the Hero. `net`: the remote player's position from the latest
+/// PlayerSnapshot; the puppet holds still if no snapshot arrived for 1 s.
+static SOURCE_NET: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_SOURCE").map(|v| v == "net").unwrap_or(false)
+});
+static REMOTE_SEEN_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static REMOTE_FRESH_STEPS: AtomicU64 = AtomicU64::new(0);
+static REMOTE_STALE_STEPS: AtomicU64 = AtomicU64::new(0);
+
+/// Called by the packet handler whenever a PlayerSnapshot arrives.
+pub fn note_remote_snapshot() {
+    *REMOTE_SEEN_AT.lock() = Some(std::time::Instant::now());
+}
+
+fn remote_target() -> Option<[f32; 3]> {
+    let fresh = REMOTE_SEEN_AT
+        .lock()
+        .map(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        .unwrap_or(false);
+    if !fresh {
+        return None;
+    }
+    let m = crate::global()?;
+    let snap = m.remote_player.lock().clone()?;
+    Some(snap.position)
+}
 static LAST_WARP_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static RAW_STEPS: AtomicU64 = AtomicU64::new(0);
 /// Turn the puppet's own logic (AI) off: ChrCmd_EnableLogic clears bit 0 of
@@ -336,6 +363,21 @@ fn write_step(from_ticker: bool) {
                 }
             }
             let h = heading_update(hero);
+            // Target on the ground plane, and the height we expect it at.
+            let (tx, ty, tz) = if *SOURCE_NET {
+                match remote_target() {
+                    Some(r) => {
+                        REMOTE_FRESH_STEPS.fetch_add(1, Ordering::Relaxed);
+                        (r[0], r[1], r[2])
+                    }
+                    None => {
+                        REMOTE_STALE_STEPS.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            } else {
+                (hero[0] + h[0] * *OFFSET_M, hero[1], hero[2] + h[1] * *OFFSET_M)
+            };
             // Keep the height the game resolved (cur[1]): forcing the Hero's
             // height put the puppet into slopes and made physics push it out
             // every frame (FPS fell to ~15 in the first runs).
@@ -343,13 +385,13 @@ fn write_step(from_ticker: bool) {
             // the world (run 4: y went -43 → -265, then despawn). So keep the
             // game's height only while it stays near the Hero's; otherwise put
             // it 0.2 m above the Hero's height and let it land.
-            let y = if cur[1] < hero[1] - 1.0 || cur[1] > hero[1] + 2.0 {
+            let y = if cur[1] < ty - 1.0 || cur[1] > ty + 2.0 {
                 RESCUED.fetch_add(1, Ordering::Relaxed);
-                hero[1] + 0.2
+                ty + 0.2
             } else {
                 cur[1]
             };
-            let desired = [hero[0] + h[0] * *OFFSET_M, y, hero[2] + h[1] * *OFFSET_M];
+            let desired = [tx, y, tz];
             if *LOGIC_OFF {
                 logic_off(t.ptr);
             }
@@ -602,6 +644,10 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         height_resets = RESCUED.load(Ordering::Relaxed),
         mode = if *MODE_RAW { "raw" } else { "warp" },
         warps = WARPS.load(Ordering::Relaxed),
+        source = if *SOURCE_NET { "net" } else { "offset" },
+        remote_fresh = REMOTE_FRESH_STEPS.load(Ordering::Relaxed),
+        remote_stale = REMOTE_STALE_STEPS.load(Ordering::Relaxed),
+        remote_pos = ?remote_target(),
         raw_steps = RAW_STEPS.load(Ordering::Relaxed),
         warp_ms = *WARP_MS,
         warp_refused = WARP_REFUSED.load(Ordering::Relaxed),

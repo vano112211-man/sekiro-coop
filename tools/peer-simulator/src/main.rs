@@ -27,7 +27,11 @@ fn usage() {
 
 Usage:
     peer-simulator [--bind <ip:port>] [--peer <ip:port>] [--as host|client]
-                   [--ticks <n>] [--rate <hz>]
+                   [--ticks <n>] [--rate <hz>] [--fake-events]
+                   [--mirror [--mirror-delay-ms <ms>] [--mirror-offset <m>]]
+
+    --mirror  send the DLL's own position back as the remote player,
+              --mirror-delay-ms late (500) and --mirror-offset m along +X (2.0)
 
 Defaults:
     --bind   0.0.0.0:28001
@@ -53,6 +57,12 @@ fn main() -> ExitCode {
     let mut ticks: u64 = 0;
     let mut rate_hz: u64 = 60;
     let mut fake_events = false;
+    // --mirror: replay the DLL's own position back as the remote player,
+    // `mirror_delay_ms` late and `mirror_offset` metres along +X, so a puppet
+    // driven by the network can be checked with one game client.
+    let mut mirror = false;
+    let mut mirror_delay_ms: u64 = 500;
+    let mut mirror_offset: f32 = 2.0;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -70,6 +80,9 @@ fn main() -> ExitCode {
             "--ticks" => { i += 1; ticks = args[i].parse().unwrap_or(0); }
             "--rate" => { i += 1; rate_hz = args[i].parse().unwrap_or(60); }
             "--fake-events" => { fake_events = true; }
+            "--mirror" => { mirror = true; }
+            "--mirror-delay-ms" => { i += 1; mirror_delay_ms = args[i].parse().unwrap_or(500); }
+            "--mirror-offset" => { i += 1; mirror_offset = args[i].parse().unwrap_or(2.0); }
             "-h" | "--help" => { usage(); return ExitCode::SUCCESS; }
             other => { eprintln!("unknown flag: {other}"); usage(); return ExitCode::FAILURE; }
         }
@@ -136,12 +149,37 @@ fn main() -> ExitCode {
     // divergence-log path — proves the round-trip without needing a
     // second real Sekiro instance.
     let mut last_rx_enemies: Vec<EnemyState> = Vec::new();
+    let mut history: std::collections::VecDeque<(Instant, [f32; 3], u32)> =
+        std::collections::VecDeque::new();
 
     loop {
         frame += 1;
 
         // Canned player snapshot — slow circular walk at the origin.
         let theta = (frame as f32) * 0.05;
+        let mut position = [theta.cos() * 3.0, 0.0, theta.sin() * 3.0];
+        let mut animation_id = if frame % 120 < 60 { 790010 } else { 790020 };
+        if mirror {
+            let cutoff = Instant::now() - Duration::from_millis(mirror_delay_ms);
+            // Keep only what we still need: drop entries older than the newest
+            // one that is already past the cutoff.
+            while history.len() > 1 && history[1].0 <= cutoff {
+                history.pop_front();
+            }
+            match history.front() {
+                Some(&(t, p, a)) if t <= cutoff => {
+                    position = [p[0] + mirror_offset, p[1], p[2]];
+                    animation_id = a;
+                }
+                // Nothing old enough yet: send nothing rather than the canned
+                // circle at the world origin.
+                _ => {
+                    thread::sleep(tick_period);
+                    poll_only(&mut session, &mut history, mirror);
+                    continue;
+                }
+            }
+        }
         let snap = PlayerSnapshot {
             frame,
             peer: role,
@@ -149,8 +187,8 @@ fn main() -> ExitCode {
             max_hp: 420,
             posture: 0,
             max_posture: 100,
-            position: [theta.cos() * 3.0, 0.0, theta.sin() * 3.0],
-            animation_id: if frame % 120 < 60 { 790010 } else { 790020 },
+            position,
+            animation_id,
             igt_ms: t0.elapsed().as_millis() as u32,
         };
 
@@ -194,6 +232,9 @@ fn main() -> ExitCode {
             tracing::debug!(?header.packet_type, "rx");
             match body {
                 PacketBody::PlayerSnapshot(s) => {
+                    if mirror {
+                        history.push_back((Instant::now(), s.position, s.animation_id));
+                    }
                     if frame % 60 == 0 {
                         tracing::info!(
                             frame,
@@ -248,7 +289,7 @@ fn main() -> ExitCode {
         }
 
         if frame % 60 == 0 {
-            tracing::info!(frame, "sent snapshot");
+            tracing::info!(frame, pos = ?snap.position, mirror, "sent snapshot");
         }
 
         if ticks != 0 && frame >= ticks {
@@ -257,5 +298,22 @@ fn main() -> ExitCode {
         }
 
         thread::sleep(tick_period);
+    }
+}
+
+/// Receive-only pass used while the mirror has no history yet: keeps the
+/// session alive and fills the history from the DLL's snapshots.
+fn poll_only<T: sekiro_coop_net::transport::Transport>(
+    session: &mut Session<T>,
+    history: &mut std::collections::VecDeque<(Instant, [f32; 3], u32)>,
+    mirror: bool,
+) {
+    let mut buf = vec![0u8; 64 * 1024];
+    while let Ok(Some((_header, body))) = session.poll_packet(&mut buf) {
+        if let PacketBody::PlayerSnapshot(s) = body {
+            if mirror {
+                history.push_back((Instant::now(), s.position, s.animation_id));
+            }
+        }
     }
 }

@@ -865,6 +865,7 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
         PacketBody::PlayerSnapshot(snap) => {
             // Store the latest remote snapshot; periodic log prints it.
             *m.remote_player.lock() = Some(snap);
+            puppet::note_remote_snapshot();
         }
         PacketBody::BridgeEvents { frame, events } => {
             tracing::info!(
