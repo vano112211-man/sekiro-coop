@@ -725,6 +725,8 @@ pub fn on_frame() {
                         animation_id: anim,
                         igt_ms: state.igt_ms.unwrap_or(0),
                         yaw: puppet::hero_yaw().unwrap_or(0.0),
+                        action_id: puppet::hero_action().0,
+                        action_seq: puppet::hero_action().1,
                     };
                     let _ = sess.send_unreliable(
                         PacketType::State,

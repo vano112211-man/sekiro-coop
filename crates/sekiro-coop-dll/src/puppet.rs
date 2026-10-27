@@ -477,6 +477,73 @@ fn remote_anim() -> Option<u32> {
 
 /// Remote animation changes: log them, learn the id it shows at rest, and
 /// when it starts something else while standing, play the action animation.
+/// Remote action → puppet animation, by id family (run 23 catalog on c1020:
+/// 3000-3010 are its attacks; the owner saw 3002 as a jump, 3003/3004 as a
+/// dodge-like lunge). Block and parry have no counterpart found yet.
+fn map_action(id: u32) -> Option<u32> {
+    if let Some((_, to)) = ACTION_MAP.iter().find(|(from, _)| *from == id) {
+        return Some(*to).filter(|t| *t != 0);
+    }
+    match id {
+        // Ground combo: 503000x0 = hit x+1. 503001x0 follows each hit and
+        // 50308050 follows the jump attack (run 23 order): not new actions.
+        50300000..=50300090 if id % 10 == 0 => Some(match (id % 100) / 10 {
+            0 => 3000,
+            1 => 3001,
+            2 => 3005,
+            _ => 3006,
+        }),
+        50308000 => Some(3002), // jump attack
+        201001 => Some(3002),   // jump (201011, 201040 follow it)
+        213300 | 213301 => Some(3004), // dodge / step
+        _ => None,
+    }
+}
+static REMOTE_ACTION_SEQ: Mutex<Option<u32>> = Mutex::new(None);
+static ACTION_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+unsafe fn remote_action_step(chr: usize) {
+    let fresh = REMOTE_SEEN_AT
+        .lock()
+        .map(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        .unwrap_or(false);
+    if !fresh {
+        return;
+    }
+    let Some(m) = crate::global() else { return };
+    let Some(snap) = m.remote_player.lock().clone() else { return };
+    let mut last = REMOTE_ACTION_SEQ.lock();
+    let first = last.is_none();
+    if *last == Some(snap.action_seq) {
+        return;
+    }
+    *last = Some(snap.action_seq);
+    drop(last);
+    if first {
+        return;
+    }
+    let to = map_action(snap.action_id);
+    let forced = match to {
+        Some(to) => force_anim(chr, to),
+        None => false,
+    };
+    let now = std::time::Instant::now();
+    if forced {
+        *LAST_FORCE_AT.lock() = Some(now);
+        *FORCE_CHECK.lock() = Some((now, to.unwrap_or(0)));
+    }
+    if ACTION_LOGGED.fetch_add(1, Ordering::Relaxed) < 500 {
+        tracing::info!(
+            t_ms = T0.elapsed().as_millis() as u64,
+            action = snap.action_id,
+            seq = snap.action_seq,
+            puppet = ?to,
+            forced,
+            "puppet remote action"
+        );
+    }
+}
+
 unsafe fn action_step(chr: usize, moving: bool) {
     let Some(a) = remote_anim() else { return };
     let now = std::time::Instant::now();
@@ -493,11 +560,10 @@ unsafe fn action_step(chr: usize, moving: bool) {
             *REMOTE_ANIM.lock() = Some((a, now));
             // Run 21: the remote's own id says which action it is. Play the
             // mapped puppet animation (attacks while moving too).
-            let mapped = ACTION_MAP.iter().find(|(from, _)| *from == a).map(|(_, to)| *to);
-            let forced = match mapped {
-                Some(to) if to != 0 && !action_playing() => force_anim(chr, to),
-                _ => false,
-            };
+            // Run 23: actions come from the action slots now (remote_action_step);
+            // the base layer is only logged.
+            let mapped: Option<u32> = None;
+            let forced = false;
             if forced {
                 *LAST_FORCE_AT.lock() = Some(now);
                 *FORCE_CHECK.lock() = Some((now, mapped.unwrap_or(0)));
@@ -516,7 +582,7 @@ unsafe fn action_step(chr: usize, moving: bool) {
 /// 213300/213301 = dodge. Override: `SEKIRO_COOP_PUPPET_MAP=790040:3000,...`.
 static ACTION_MAP: Lazy<Vec<(u32, u32)>> = Lazy::new(|| {
     let spec = std::env::var("SEKIRO_COOP_PUPPET_MAP")
-        .unwrap_or_else(|_| "790040:3000".to_string());
+        .unwrap_or_default();
     spec.split(',')
         .filter_map(|kv| {
             let (k, v) = kv.split_once(':')?;
@@ -849,6 +915,7 @@ fn write_step(from_ticker: bool) {
             let moving = TARGET_MOVING.load(Ordering::Relaxed);
             if *SOURCE_NET {
                 action_step(t.ptr, moving);
+                remote_action_step(t.ptr);
             }
             let warped = !*MODE_RAW
                 && ((warp_due && moving) || off_by > 2.0)
@@ -961,6 +1028,44 @@ fn hero_chr() -> Option<usize> {
     let addrs = m.base_addrs.as_ref()?;
     let base = MODULE_BASE.load(Ordering::Relaxed);
     unsafe { read_ptr(base + addrs.player_position).and_then(|a| read_ptr(a + 0x88)) }
+}
+
+/// Hero action slots (run 23): the TimeAct object `[ChrIns+0x1ff8]+0x10`
+/// keeps two rings of 5 entries with stride 0x28. The ring at +0x20 holds the
+/// base layer (790010 idle, 790040 combat idle, ...); the ring at +0x34 also
+/// gets the attack combo (50300000, 50300010, ...), jump attack (50308000),
+/// parry (50002000), jump (201001), dodge (213300). A new action is written
+/// into one of the +0x34 slots, so any slot changing to a non-zero id marks a
+/// new action, even when the id repeats.
+static ACTION_PREV: Mutex<Option<[u32; 5]>> = Mutex::new(None);
+static ACTION_CUR: Mutex<(u32, u32)> = Mutex::new((0, 0));
+
+pub fn hero_action() -> (u32, u32) {
+    let Some(chr) = hero_chr() else { return *ACTION_CUR.lock() };
+    let slots: Option<[u32; 5]> = unsafe {
+        read_ptr(chr + 0x1ff8).and_then(|sm| read_ptr(sm + 0x10)).and_then(|ta| {
+            if !readable(ta + 0x34, 0x28 * 4 + 4) {
+                return None;
+            }
+            let mut v = [0u32; 5];
+            for (k, x) in v.iter_mut().enumerate() {
+                *x = core::ptr::read_volatile((ta + 0x34 + k * 0x28) as *const u32);
+            }
+            Some(v)
+        })
+    };
+    let Some(slots) = slots else { return *ACTION_CUR.lock() };
+    let mut prev = ACTION_PREV.lock();
+    let mut cur = ACTION_CUR.lock();
+    if let Some(p) = *prev {
+        for k in 0..5 {
+            if slots[k] != p[k] && slots[k] != 0 && slots[k] != u32::MAX {
+                *cur = (slots[k], cur.1.wrapping_add(1));
+            }
+        }
+    }
+    *prev = Some(slots);
+    *cur
 }
 
 /// Run 22: the snapshot's animation id (`+0x1ff8 → +0x10 → +0x20`) did not

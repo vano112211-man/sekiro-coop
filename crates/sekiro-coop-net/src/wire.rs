@@ -124,6 +124,11 @@ pub struct PlayerSnapshot {
     /// Facing, radians, as the game stores it in the physics module
     /// (`+0x70` = `[0, yaw, 0, 0]`). Lets the remote puppet turn in place.
     pub yaw: f32,
+    /// Latest action animation (attack, jump, dodge, ...) from the Hero's
+    /// action slots (TimeAct `+0x34 + k*0x28`, run 23), and a counter that
+    /// goes up each time one starts, so a repeated id is still seen as new.
+    pub action_id: u32,
+    pub action_seq: u32,
 }
 
 /// One non-player ChrIns at a given tick.  Identified by `handle`,

@@ -149,7 +149,7 @@ fn main() -> ExitCode {
     // divergence-log path — proves the round-trip without needing a
     // second real Sekiro instance.
     let mut last_rx_enemies: Vec<EnemyState> = Vec::new();
-    let mut history: std::collections::VecDeque<(Instant, [f32; 3], u32, f32)> =
+    let mut history: std::collections::VecDeque<(Instant, [f32; 3], u32, f32, u32, u32)> =
         std::collections::VecDeque::new();
 
     loop {
@@ -160,6 +160,8 @@ fn main() -> ExitCode {
         let mut position = [theta.cos() * 3.0, 0.0, theta.sin() * 3.0];
         let mut animation_id = if frame % 120 < 60 { 790010 } else { 790020 };
         let mut yaw = 0.0f32;
+        let mut action_id = 0u32;
+        let mut action_seq = 0u32;
         if mirror {
             let cutoff = Instant::now() - Duration::from_millis(mirror_delay_ms);
             // Keep only what we still need: drop entries older than the newest
@@ -168,10 +170,12 @@ fn main() -> ExitCode {
                 history.pop_front();
             }
             match history.front() {
-                Some(&(t, p, a, y)) if t <= cutoff => {
+                Some(&(t, p, a, y, ai, aseq)) if t <= cutoff => {
                     position = [p[0] + mirror_offset, p[1], p[2]];
                     animation_id = a;
                     yaw = y;
+                    action_id = ai;
+                    action_seq = aseq;
                 }
                 // Nothing old enough yet: send nothing rather than the canned
                 // circle at the world origin.
@@ -200,6 +204,8 @@ fn main() -> ExitCode {
             animation_id,
             igt_ms: t0.elapsed().as_millis() as u32,
             yaw,
+            action_id,
+            action_seq,
         };
 
         if let Err(e) =
@@ -246,7 +252,7 @@ fn main() -> ExitCode {
                 }
                 PacketBody::PlayerSnapshot(s) => {
                     if mirror {
-                        history.push_back((Instant::now(), s.position, s.animation_id, s.yaw));
+                        history.push_back((Instant::now(), s.position, s.animation_id, s.yaw, s.action_id, s.action_seq));
                     }
                     if frame % 60 == 0 {
                         tracing::info!(
@@ -319,7 +325,7 @@ fn main() -> ExitCode {
 /// session alive and fills the history from the DLL's snapshots.
 fn poll_only<T: sekiro_coop_net::transport::Transport>(
     session: &mut Session<T>,
-    history: &mut std::collections::VecDeque<(Instant, [f32; 3], u32, f32)>,
+    history: &mut std::collections::VecDeque<(Instant, [f32; 3], u32, f32, u32, u32)>,
     mirror: bool,
     role: PeerId,
 ) {
@@ -328,7 +334,7 @@ fn poll_only<T: sekiro_coop_net::transport::Transport>(
         match body {
             PacketBody::Handshake(hp) => answer_handshake(session, role, &hp),
             PacketBody::PlayerSnapshot(s) if mirror => {
-                history.push_back((Instant::now(), s.position, s.animation_id, s.yaw));
+                history.push_back((Instant::now(), s.position, s.animation_id, s.yaw, s.action_id, s.action_seq));
             }
             _ => {}
         }
