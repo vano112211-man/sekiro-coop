@@ -79,6 +79,7 @@ static HEADING: Mutex<([f32; 2], Option<[f32; 3]>)> = Mutex::new(([1.0, 0.0], No
 static TEAM_BEFORE: Mutex<Option<u8>> = Mutex::new(None);
 static TEAM_WRITES: AtomicU64 = AtomicU64::new(0);
 static REPINS: AtomicU64 = AtomicU64::new(0);
+static LAST_WRITE_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static WRITES: AtomicU64 = AtomicU64::new(0);
 static OVERWRITTEN: AtomicU64 = AtomicU64::new(0);
 static STALE: AtomicU64 = AtomicU64::new(0);
@@ -186,6 +187,18 @@ fn write_step(from_ticker: bool) {
         return;
     }
     let Some(t) = *TARGET.lock() else { return };
+    // At most one write per ~8 ms: SetFlag fires several times per frame,
+    // and writing every call cost frame time without moving the puppet more.
+    {
+        let mut last = LAST_WRITE_AT.lock();
+        let now = std::time::Instant::now();
+        if let Some(prev) = *last {
+            if now.duration_since(prev) < std::time::Duration::from_millis(8) {
+                return;
+            }
+        }
+        *last = Some(now);
+    }
     let Some(hero) = hero_pos() else { return };
     unsafe {
         if read_checked::<u32>(t.ptr + 0x08) != Some(t.handle) {
@@ -203,13 +216,16 @@ fn write_step(from_ticker: bool) {
         {
             let mut last = LAST_WRITTEN.lock();
             if let Some(l) = *last {
-                if dist(cur, l) > 0.01 {
+                if dist([cur[0], 0.0, cur[2]], [l[0], 0.0, l[2]]) > 0.01 {
                     OVERWRITTEN.fetch_add(1, Ordering::Relaxed);
                     *LAST_SEEN.lock() = Some(cur);
                 }
             }
             let h = heading_update(hero);
-            let desired = [hero[0] + h[0] * *OFFSET_M, hero[1], hero[2] + h[1] * *OFFSET_M];
+            // Keep the height the game resolved (cur[1]): forcing the Hero's
+            // height put the puppet into slopes and made physics push it out
+            // every frame (FPS fell to ~15 in the first runs).
+            let desired = [hero[0] + h[0] * *OFFSET_M, cur[1], hero[2] + h[1] * *OFFSET_M];
             RawPtr(p).write::<[f32; 3]>(desired);
             *last = Some(desired);
         }
