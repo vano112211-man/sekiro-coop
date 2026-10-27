@@ -61,6 +61,22 @@ static FREEZE_AI: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_FREEZE_AI").map(|v| v == "1").unwrap_or(false)
 });
 static FREEZE_AI_BEFORE: Mutex<Option<u8>> = Mutex::new(None);
+/// Extra ChrIns-relative offsets that hold a live copy of the position
+/// (found by the mirror scan, run 7: +0x1050 and +0x1060 in both scans).
+/// `SEKIRO_COOP_PUPPET_MIRRORS=0x1050,0x1060` (default) or `none`.
+static MIRRORS: Lazy<Vec<usize>> = Lazy::new(|| {
+    match std::env::var("SEKIRO_COOP_PUPPET_MIRRORS") {
+        Ok(v) if v.trim() == "none" => Vec::new(),
+        Ok(v) => v
+            .split(',')
+            .filter_map(|x| usize::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok())
+            .take(4)
+            .collect(),
+        Err(_) => vec![0x1050, 0x1060],
+    }
+});
+static MIRROR_OVERWRITTEN: [AtomicU64; 4] =
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static WRITER_TICKER: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_WRITER").map(|v| v == "ticker").unwrap_or(false)
 });
@@ -256,6 +272,19 @@ fn write_step(from_ticker: bool) {
             };
             let desired = [hero[0] + h[0] * *OFFSET_M, y, hero[2] + h[1] * *OFFSET_M];
             RawPtr(p).write::<[f32; 3]>(desired);
+            for (i, off) in MIRRORS.iter().enumerate() {
+                let a = t.ptr + off;
+                if !readable(a, 12) {
+                    continue;
+                }
+                if let Some(l) = *last {
+                    let m: [f32; 3] = RawPtr(a).read();
+                    if dist([m[0], 0.0, m[2]], [l[0], 0.0, l[2]]) > 0.01 {
+                        MIRROR_OVERWRITTEN[i].fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                RawPtr(a).write::<[f32; 3]>(desired);
+            }
             *last = Some(desired);
         }
         if let Some(team) = *TEAM {
@@ -286,7 +315,7 @@ pub fn on_game_thread() {
 /// the physics-module position within 2 cm. Finds the other copies of the
 /// position (physics engine proxy, render transforms) that keep reverting
 /// our writes. Read-only.
-fn mirror_scan(t: Target, label: &str) {
+fn mirror_scan(t: Target, root: usize, root_name: &str, label: &str) {
     use std::collections::{HashSet, VecDeque};
     let Some(pa) = (unsafe { phys_pos_addr(t.ptr) }) else { return };
     let p: [f32; 3] = unsafe { RawPtr(pa).read() };
@@ -296,8 +325,8 @@ fn mirror_scan(t: Target, label: &str) {
     const MAX_DEPTH: usize = 3;
     let mut seen: HashSet<usize> = HashSet::new();
     let mut q: VecDeque<(usize, usize, String)> = VecDeque::new();
-    q.push_back((t.ptr, 0, "chr".to_string()));
-    seen.insert(t.ptr);
+    q.push_back((root, 0, root_name.to_string()));
+    seen.insert(root);
     let mut hits: Vec<String> = Vec::new();
     let mut nodes = 0usize;
 
@@ -307,7 +336,7 @@ fn mirror_scan(t: Target, label: &str) {
             break;
         }
         // ChrIns is large; nested objects get a smaller window.
-        let len: usize = if depth == 0 { 0x2400 } else { 0x600 };
+        let len: usize = if depth == 0 && root == t.ptr { 0x2400 } else { 0x600 };
         let mut off = 0usize;
         while off + 12 <= len {
             let a = obj + off;
@@ -361,12 +390,23 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     let tgt = *TARGET.lock();
     if let Some(t) = tgt {
         let since = frame.saturating_sub(PINNED_AT.load(Ordering::Relaxed));
-        for (start, label) in [(120u64, "A"), (720u64, "B")] {
+        // "C": from the ChrIns, as before. "P": from the physics module
+        // object (ChrIns+0x1ff8 → +0x68), to reach the physics engine's copy.
+        for (start, label) in [(120u64, "C"), (720u64, "P")] {
             if since == start {
                 PAUSE_UNTIL.store(frame + 60, Ordering::Relaxed);
             }
             if since == start + 60 {
-                mirror_scan(t, label);
+                if label == "C" {
+                    mirror_scan(t, t.ptr, "chr", label);
+                } else {
+                    let phys = unsafe {
+                        read_ptr(t.ptr + 0x1ff8).and_then(|sm| read_ptr(sm + 0x68))
+                    };
+                    if let Some(ph) = phys {
+                        mirror_scan(t, ph, "phys", label);
+                    }
+                }
             }
         }
     }
@@ -462,6 +502,8 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         stale = STALE.load(Ordering::Relaxed),
         repins = REPINS.load(Ordering::Relaxed),
         height_resets = RESCUED.load(Ordering::Relaxed),
+        mirrors = ?MIRRORS.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>(),
+        mirror_overwritten = ?MIRROR_OVERWRITTEN.iter().take(MIRRORS.len()).map(|c| c.load(Ordering::Relaxed)).collect::<Vec<_>>(),
         freeze_ai_before = ?*FREEZE_AI_BEFORE.lock(),
         freeze_ai_now = ?freeze_now,
         team_target = ?*TEAM,
