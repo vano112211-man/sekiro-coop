@@ -53,6 +53,14 @@ static TEAM: Lazy<Option<u8>> = Lazy::new(|| {
     }
 });
 const PICK_RADIUS_M: f32 = 15.0;
+/// Test aid: set the game's global debug flag "all no update AI"
+/// (`debug_flags + 13`) so every enemy, the puppet included, stops thinking.
+/// Not a co-op solution (it freezes all enemies); it isolates "is the puppet's
+/// own AI what attacks" from everything else.
+static FREEZE_AI: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_FREEZE_AI").map(|v| v == "1").unwrap_or(false)
+});
+static FREEZE_AI_BEFORE: Mutex<Option<u8>> = Mutex::new(None);
 static WRITER_TICKER: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_WRITER").map(|v| v == "ticker").unwrap_or(false)
 });
@@ -275,6 +283,23 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     }
     let Some(hero) = hero_pos() else { return };
 
+    let mut freeze_now = None;
+    if *FREEZE_AI {
+        if let Some(addrs) = m.base_addrs.as_ref() {
+            let base = MODULE_BASE.load(Ordering::Relaxed);
+            let flag = base + addrs.debug_flags + 13;
+            unsafe {
+                if let Some(v) = read_checked::<u8>(flag) {
+                    FREEZE_AI_BEFORE.lock().get_or_insert(v);
+                    if v != 1 {
+                        RawPtr(flag).write::<u8>(1);
+                    }
+                    freeze_now = read_checked::<u8>(flag);
+                }
+            }
+        }
+    }
+
     let entries: Vec<(u32, usize)> = m.chrins_registry.lock().iter().map(|(h, p)| (*h, *p)).collect();
     let mut rows: Vec<(f32, u32, usize, u32, u8, [f32; 3], Option<u32>)> = Vec::new();
     for (h, p) in entries {
@@ -344,6 +369,8 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         stale = STALE.load(Ordering::Relaxed),
         repins = REPINS.load(Ordering::Relaxed),
         height_resets = RESCUED.load(Ordering::Relaxed),
+        freeze_ai_before = ?*FREEZE_AI_BEFORE.lock(),
+        freeze_ai_now = ?freeze_now,
         team_target = ?*TEAM,
         team_before = ?team_before,
         team_now = ?team_now,
