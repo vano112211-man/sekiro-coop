@@ -480,7 +480,18 @@ fn remote_anim() -> Option<u32> {
 /// Remote action → puppet animation, by id family (run 23 catalog on c1020:
 /// 3000-3010 are its attacks; the owner saw 3002 as a jump, 3003/3004 as a
 /// dodge-like lunge). Block and parry have no counterpart found yet.
+/// Puppet with the player's own animation set (c0000): play the remote
+/// player's action ids as they are. `SEKIRO_COOP_PUPPET_ANIM_PASSTHROUGH=1`.
+static PASSTHROUGH: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_ANIM_PASSTHROUGH").map(|v| v == "1").unwrap_or(false)
+});
+
 fn map_action(id: u32) -> Option<u32> {
+    if *PASSTHROUGH {
+        // Animation-like ids only (6+ digits); 401, 432, 600, 11, 1151 ... are
+        // movement/turn states (run 24), left to the position path.
+        return Some(id).filter(|v| (100_000..=99_999_999).contains(v));
+    }
     if let Some((_, to)) = ACTION_MAP.iter().find(|(from, _)| *from == id) {
         return Some(*to).filter(|t| *t != 0);
     }
@@ -1110,7 +1121,21 @@ fn spawn_step() {
     let rows = npc_rows_for(model);
     tracing::info!(model, candidates = ?rows, "spawn: NpcParam rows for this model");
     let Some(npc) = npc.or_else(|| rows.first().copied()) else {
-        tracing::warn!(model, "spawn: no NpcParam row, not spawning");
+        // Show what low ids exist, to pick one by hand (c0000 has no
+        // model-numbered NpcParam rows, guess).
+        let low: Vec<u32> = {
+            let base = MODULE_BASE.load(Ordering::Relaxed);
+            unsafe {
+                sekiro_sdk_sys::paramrepo::open_param(
+                    sekiro_sdk_sys::paramrepo::SOLO_PARAM_REPOSITORY_RVA_V1_06,
+                    base,
+                    sekiro_sdk_sys::paramrepo::ParamKind::NpcParam,
+                )
+                .map(|t| t.rows().map(|(id, _)| id).filter(|id| *id < 10_000_000).take(200).collect())
+                .unwrap_or_default()
+            }
+        };
+        tracing::warn!(model, low_rows = ?low, "spawn: no NpcParam row for this model, not spawning");
         return;
     };
     let think = think.unwrap_or(npc);
