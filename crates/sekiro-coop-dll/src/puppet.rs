@@ -349,6 +349,20 @@ fn write_step(from_ticker: bool) {
             *LAST_WRITTEN.lock() = None;
             return;
         }
+        // Make the puppet harmless first, whatever happens below (run 11: with
+        // no network data the step returned before this and it attacked).
+        if *LOGIC_OFF {
+            logic_off(t.ptr);
+        }
+        if let Some(team) = *TEAM {
+            if let Some(cur_team) = read_checked::<u8>(t.ptr + 0x74) {
+                if cur_team != team {
+                    TEAM_BEFORE.lock().get_or_insert(cur_team);
+                    RawPtr(t.ptr + 0x74).write::<u8>(team);
+                    TEAM_WRITES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         let Some(p) = phys_pos_addr(t.ptr) else {
             STALE.fetch_add(1, Ordering::Relaxed);
             return;
@@ -392,9 +406,6 @@ fn write_step(from_ticker: bool) {
                 cur[1]
             };
             let desired = [tx, y, tz];
-            if *LOGIC_OFF {
-                logic_off(t.ptr);
-            }
             let off_by = dist([cur[0], 0.0, cur[2]], [desired[0], 0.0, desired[2]]);
             let warp_due = {
                 let last_warp = *LAST_WARP_AT.lock();
@@ -426,15 +437,6 @@ fn write_step(from_ticker: bool) {
                 RawPtr(a).write::<[f32; 3]>(desired);
             }
             *last = Some(desired);
-        }
-        if let Some(team) = *TEAM {
-            if let Some(cur_team) = read_checked::<u8>(t.ptr + 0x74) {
-                if cur_team != team {
-                    TEAM_BEFORE.lock().get_or_insert(cur_team);
-                    RawPtr(t.ptr + 0x74).write::<u8>(team);
-                    TEAM_WRITES.fetch_add(1, Ordering::Relaxed);
-                }
-            }
         }
         WRITES.fetch_add(1, Ordering::Relaxed);
         let _ = WRITER_TID.set(format!("{:?}", std::thread::current().id()));

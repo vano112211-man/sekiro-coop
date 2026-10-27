@@ -174,6 +174,13 @@ fn main() -> ExitCode {
                 // Nothing old enough yet: send nothing rather than the canned
                 // circle at the world origin.
                 _ => {
+                    if frame % 60 == 0 {
+                        tracing::info!(frame, history = history.len(), "mirror: waiting for DLL snapshots");
+                    }
+                    // Keep the link alive while we wait: the DLL ends the
+                    // session after its grace period if nothing arrives
+                    // (run 11: silence → "peer grace expired").
+                    let _ = session.tick_heartbeat(frame);
                     thread::sleep(tick_period);
                     poll_only(&mut session, &mut history, mirror);
                     continue;
@@ -288,6 +295,7 @@ fn main() -> ExitCode {
             }
         }
 
+        let _ = session.tick_heartbeat(frame);
         if frame % 60 == 0 {
             tracing::info!(frame, pos = ?snap.position, mirror, "sent snapshot");
         }

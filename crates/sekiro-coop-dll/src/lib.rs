@@ -819,7 +819,10 @@ pub fn on_frame() {
                 // Quietly wait for re-contact.
             }
             LinkState::Expired => {
-                tracing::warn!("peer grace expired; session will end");
+                // Logged once a second, not every frame (run 11 log: 3,700 lines).
+                if frame % 60 == 0 {
+                    tracing::warn!("peer grace expired; waiting for the peer");
+                }
                 // DLL should drop the session; we leave that to a
                 // higher-level supervisor.
             }
