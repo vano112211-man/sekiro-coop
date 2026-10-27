@@ -493,9 +493,9 @@ fn map_action(id: u32) -> Option<u32> {
             2 => 3005,
             _ => 3006,
         }),
-        50308000 => Some(3002), // jump attack
-        201001 => Some(3002),   // jump (201011, 201040 follow it)
-        213300 | 213301 => Some(3004), // dodge / step
+        // Jump, jump attack, dodge, block: c1020 has no lookalike (run 24: 3002
+        // reads as a plain strike, 3004 as an arc swing). The position path
+        // already lifts the puppet for a jump.
         _ => None,
     }
 }
@@ -1039,6 +1039,7 @@ fn hero_chr() -> Option<usize> {
 /// new action, even when the id repeats.
 static ACTION_PREV: Mutex<Option<[u32; 5]>> = Mutex::new(None);
 static ACTION_CUR: Mutex<(u32, u32)> = Mutex::new((0, 0));
+static ACTION_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 pub fn hero_action() -> (u32, u32) {
     let Some(chr) = hero_chr() else { return *ACTION_CUR.lock() };
@@ -1059,8 +1060,18 @@ pub fn hero_action() -> (u32, u32) {
     let mut cur = ACTION_CUR.lock();
     if let Some(p) = *prev {
         for k in 0..5 {
-            if slots[k] != p[k] && slots[k] != 0 && slots[k] != u32::MAX {
-                *cur = (slots[k], cur.1.wrapping_add(1));
+            let v = slots[k];
+            if v != p[k] && v != 0 && v != u32::MAX {
+                // Run 24: one action is written into several slots over ~100 ms;
+                // count it once. The same id again after 300 ms is a new action.
+                let mut at = ACTION_AT.lock();
+                let recent = at
+                    .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
+                    .unwrap_or(false);
+                if v != cur.0 || !recent {
+                    *cur = (v, cur.1.wrapping_add(1));
+                    *at = Some(std::time::Instant::now());
+                }
             }
         }
     }
