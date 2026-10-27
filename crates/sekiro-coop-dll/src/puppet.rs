@@ -10,8 +10,12 @@
 //! 1. Surveys the registry once per second (`puppet survey`): handle, c-id,
 //!    team, distance to the Hero, animation — to pick a visible character.
 //! 2. Pins one target (nearest team-6 character within 12 m, or the c-id in
-//!    `SEKIRO_COOP_PUPPET_CHAR`) and holds it `SEKIRO_COOP_PUPPET_OFFSET`
-//!    metres (default 3) beside the Hero along +X.
+//!    `SEKIRO_COOP_PUPPET_CHAR`) within 15 m and holds it
+//!    `SEKIRO_COOP_PUPPET_OFFSET` metres (default 3) ahead of the Hero along
+//!    the Hero's last movement direction. After a reload the same handle is
+//!    re-pinned once the registry has its new pointer.
+//! 2b. Writes `SEKIRO_COOP_PUPPET_TEAM` (default 2 = WhitePhantom, DS3
+//!    numbering; -1 = off) to the target's team byte (ChrIns+0x74).
 //! 3. Writes from the game thread inside the SetFlag detour (default), or from
 //!    the ticker thread with `SEKIRO_COOP_PUPPET_WRITER=ticker`, and counts how
 //!    often the game changed the value between two of our writes.
@@ -39,6 +43,16 @@ static OFFSET_M: Lazy<f32> = Lazy::new(|| {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(3.0)
 });
+/// Team byte written to the puppet (ChrIns+0x74). Default 2 = WhitePhantom
+/// (DS3 numbering; the Hero is 1). `SEKIRO_COOP_PUPPET_TEAM=-1` disables.
+static TEAM: Lazy<Option<u8>> = Lazy::new(|| {
+    match std::env::var("SEKIRO_COOP_PUPPET_TEAM").ok().and_then(|v| v.trim().parse::<i32>().ok()) {
+        Some(v) if v < 0 => None,
+        Some(v) => Some(v as u8),
+        None => Some(2),
+    }
+});
+const PICK_RADIUS_M: f32 = 15.0;
 static WRITER_TICKER: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_WRITER").map(|v| v == "ticker").unwrap_or(false)
 });
@@ -57,6 +71,14 @@ static TARGET: Mutex<Option<Target>> = Mutex::new(None);
 static LAST_WRITTEN: Mutex<Option<[f32; 3]>> = Mutex::new(None);
 static LAST_SEEN: Mutex<Option<[f32; 3]>> = Mutex::new(None);
 
+/// Handle of the last target, kept after it goes stale so we can re-pin the
+/// same character once the registry has its new pointer.
+static LAST_HANDLE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+/// Hero heading on the ground plane (x, z), from movement.
+static HEADING: Mutex<([f32; 2], Option<[f32; 3]>)> = Mutex::new(([1.0, 0.0], None));
+static TEAM_BEFORE: Mutex<Option<u8>> = Mutex::new(None);
+static TEAM_WRITES: AtomicU64 = AtomicU64::new(0);
+static REPINS: AtomicU64 = AtomicU64::new(0);
 static WRITES: AtomicU64 = AtomicU64::new(0);
 static OVERWRITTEN: AtomicU64 = AtomicU64::new(0);
 static STALE: AtomicU64 = AtomicU64::new(0);
@@ -137,6 +159,24 @@ fn hero_pos() -> Option<[f32; 3]> {
     unsafe { sekiro_sdk_sys::live::player_position_xyz(addrs, base) }
 }
 
+/// Unit vector of the Hero's last movement on the ground plane (x, z). Only
+/// updated after 0.3 m of travel so jitter does not spin it.
+fn heading_update(hero: [f32; 3]) -> [f32; 2] {
+    let mut g = HEADING.lock();
+    match g.1 {
+        None => g.1 = Some(hero),
+        Some(prev) => {
+            let (dx, dz) = (hero[0] - prev[0], hero[2] - prev[2]);
+            let len = (dx * dx + dz * dz).sqrt();
+            if len > 0.3 {
+                g.0 = [dx / len, dz / len];
+                g.1 = Some(hero);
+            }
+        }
+    }
+    g.0
+}
+
 // ---------------------------------------------------------------- writer
 
 /// Hold the pinned target beside the Hero. Called from the SetFlag detour
@@ -150,6 +190,7 @@ fn write_step(from_ticker: bool) {
     unsafe {
         if read_checked::<u32>(t.ptr + 0x08) != Some(t.handle) {
             STALE.fetch_add(1, Ordering::Relaxed);
+            *LAST_HANDLE.lock() = Some((t.handle, t.char_id));
             *TARGET.lock() = None;
             *LAST_WRITTEN.lock() = None;
             return;
@@ -167,9 +208,19 @@ fn write_step(from_ticker: bool) {
                     *LAST_SEEN.lock() = Some(cur);
                 }
             }
-            let desired = [hero[0] + *OFFSET_M, hero[1], hero[2]];
+            let h = heading_update(hero);
+            let desired = [hero[0] + h[0] * *OFFSET_M, hero[1], hero[2] + h[1] * *OFFSET_M];
             RawPtr(p).write::<[f32; 3]>(desired);
             *last = Some(desired);
+        }
+        if let Some(team) = *TEAM {
+            if let Some(cur_team) = read_checked::<u8>(t.ptr + 0x74) {
+                if cur_team != team {
+                    TEAM_BEFORE.lock().get_or_insert(cur_team);
+                    RawPtr(t.ptr + 0x74).write::<u8>(team);
+                    TEAM_WRITES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
         WRITES.fetch_add(1, Ordering::Relaxed);
         let _ = WRITER_TID.set(format!("{:?}", std::thread::current().id()));
@@ -225,13 +276,19 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     tracing::info!(hero = ?hero, total = rows.len(), nearest = ?sample, "puppet survey");
 
     if pinned.is_none() {
-        let pick = rows.iter().find(|r| {
+        let last = *LAST_HANDLE.lock();
+        let same = last.and_then(|(h, _)| rows.iter().find(|r| r.1 == h && r.0 < PICK_RADIUS_M));
+        if let Some(r) = same {
+            REPINS.fetch_add(1, Ordering::Relaxed);
+            tracing::info!(handle = r.1, char_id = r.3, dist = r.0, "puppet target re-pinned (same handle)");
+        }
+        let pick = same.or_else(|| rows.iter().find(|r| {
             let (d, _, _, c, team, _, _) = **r;
             match *PIN_CHAR {
                 Some(want) => c == want,
-                None => team == 6 && c != 0 && d > 0.5 && d < 12.0,
+                None => team == 6 && c != 0 && d > 0.5 && d < PICK_RADIUS_M,
             }
-        });
+        }));
         if let Some(r) = pick {
             let t = Target { handle: r.1, ptr: r.2, char_id: r.3 };
             *TARGET.lock() = Some(t);
@@ -242,6 +299,14 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
 
     let t = *TARGET.lock();
     let cur = t.and_then(|t| unsafe { phys_pos_addr(t.ptr).map(|p| RawPtr(p).read::<[f32; 3]>()) });
+    // Copy every guarded value out first, one lock at a time: the game
+    // thread takes LAST_WRITTEN then LAST_SEEN/HEADING, so holding several
+    // of these at once here could deadlock against it.
+    let team_before = *TEAM_BEFORE.lock();
+    let heading = HEADING.lock().0;
+    let last_written = *LAST_WRITTEN.lock();
+    let last_seen = *LAST_SEEN.lock();
+    let team_now = t.and_then(|t| unsafe { read_checked::<u8>(t.ptr + 0x74) });
     tracing::info!(
         writer = if *WRITER_TICKER { "ticker" } else { "game(SetFlag)" },
         writer_thread = WRITER_TID.get().map(String::as_str).unwrap_or("-"),
@@ -250,8 +315,14 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         writes = WRITES.load(Ordering::Relaxed),
         overwritten = OVERWRITTEN.load(Ordering::Relaxed),
         stale = STALE.load(Ordering::Relaxed),
-        last_written = ?*LAST_WRITTEN.lock(),
-        last_seen_by_game = ?*LAST_SEEN.lock(),
+        repins = REPINS.load(Ordering::Relaxed),
+        team_target = ?*TEAM,
+        team_before = ?team_before,
+        team_now = ?team_now,
+        team_writes = TEAM_WRITES.load(Ordering::Relaxed),
+        heading = ?heading,
+        last_written = ?last_written,
+        last_seen_by_game = ?last_seen,
         now = ?cur,
         "puppet probe stats"
     );
