@@ -79,6 +79,7 @@ static HEADING: Mutex<([f32; 2], Option<[f32; 3]>)> = Mutex::new(([1.0, 0.0], No
 static TEAM_BEFORE: Mutex<Option<u8>> = Mutex::new(None);
 static TEAM_WRITES: AtomicU64 = AtomicU64::new(0);
 static REPINS: AtomicU64 = AtomicU64::new(0);
+static RESCUED: AtomicU64 = AtomicU64::new(0);
 static LAST_WRITE_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static WRITES: AtomicU64 = AtomicU64::new(0);
 static OVERWRITTEN: AtomicU64 = AtomicU64::new(0);
@@ -225,7 +226,17 @@ fn write_step(from_ticker: bool) {
             // Keep the height the game resolved (cur[1]): forcing the Hero's
             // height put the puppet into slopes and made physics push it out
             // every frame (FPS fell to ~15 in the first runs).
-            let desired = [hero[0] + h[0] * *OFFSET_M, cur[1], hero[2] + h[1] * *OFFSET_M];
+            // ...but moving it sideways without support let it fall through
+            // the world (run 4: y went -43 → -265, then despawn). So keep the
+            // game's height only while it stays near the Hero's; otherwise put
+            // it 0.2 m above the Hero's height and let it land.
+            let y = if cur[1] < hero[1] - 1.0 || cur[1] > hero[1] + 2.0 {
+                RESCUED.fetch_add(1, Ordering::Relaxed);
+                hero[1] + 0.2
+            } else {
+                cur[1]
+            };
+            let desired = [hero[0] + h[0] * *OFFSET_M, y, hero[2] + h[1] * *OFFSET_M];
             RawPtr(p).write::<[f32; 3]>(desired);
             *last = Some(desired);
         }
@@ -332,6 +343,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         overwritten = OVERWRITTEN.load(Ordering::Relaxed),
         stale = STALE.load(Ordering::Relaxed),
         repins = REPINS.load(Ordering::Relaxed),
+        height_resets = RESCUED.load(Ordering::Relaxed),
         team_target = ?*TEAM,
         team_before = ?team_before,
         team_now = ?team_now,
