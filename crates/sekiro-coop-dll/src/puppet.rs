@@ -149,6 +149,8 @@ static SMOOTH: Lazy<f32> = Lazy::new(|| {
 });
 /// Yaw (radians) the puppet should face: from the target's movement.
 static YAW: Mutex<Option<f32>> = Mutex::new(None);
+static YAW_TARGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static HAVE_YAW_TARGET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LAST_TARGET: Mutex<Option<[f32; 3]>> = Mutex::new(None);
 static YAW_OFFSET: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_YAW_OFFSET_DEG")
@@ -374,10 +376,20 @@ unsafe fn reset_anim(chr: usize) -> bool {
     true
 }
 
-/// Yaw-only quaternion, Havok order (x, y, z, w), rotation about +Y.
-fn yaw_quat(yaw: f32) -> [f32; 4] {
-    let h = 0.5 * yaw;
-    [0.0, h.sin(), 0.0, h.cos()]
+/// Physics module +0x70 is NOT a quaternion: for the Hero it reads
+/// `[0, yaw, 0, 0]` with yaw in radians (run 14). Calibrated against the
+/// Hero's movement direction (dx, dz) over 8 samples: yaw = atan2(-dx, -dz).
+fn yaw_rot(yaw: f32) -> [f32; 4] {
+    [0.0, yaw, 0.0, 0.0]
+}
+
+fn wrap_pi(a: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    let mut x = (a + std::f32::consts::PI) % tau;
+    if x < 0.0 {
+        x += tau;
+    }
+    x - std::f32::consts::PI
 }
 
 /// Hero rotation quaternion (physics module +0x70), for calibration logs.
@@ -537,12 +549,19 @@ fn write_step(from_ticker: bool) {
                 let mut yg = YAW.lock();
                 if let Some(prev) = *lt {
                     let (dx, dz) = (tx - prev[0], tz - prev[2]);
-                    if dx * dx + dz * dz > 0.05 * 0.05 {
-                        *yg = Some(dx.atan2(dz) + *YAW_OFFSET);
+                    if dx * dx + dz * dz > 0.15 * 0.15 {
+                        YAW_TARGET.store((wrap_pi((-dx).atan2(-dz) + *YAW_OFFSET)).to_bits(), Ordering::Relaxed);
+                        HAVE_YAW_TARGET.store(true, Ordering::Relaxed);
                         *lt = Some([tx, ty, tz]);
                     }
                 } else {
                     *lt = Some([tx, ty, tz]);
+                }
+                // Turn toward the target yaw along the shorter arc.
+                if HAVE_YAW_TARGET.load(Ordering::Relaxed) {
+                    let goal = f32::from_bits(YAW_TARGET.load(Ordering::Relaxed));
+                    let now = yg.unwrap_or(goal);
+                    *yg = Some(wrap_pi(now + wrap_pi(goal - now) * 0.25));
                 }
                 *yg
             };
@@ -558,7 +577,7 @@ fn write_step(from_ticker: bool) {
             if let Some(yaw) = yaw {
                 if let Some(rp) = read_ptr(t.ptr + 0x1ff8).and_then(|sm| read_ptr(sm + 0x68)) {
                     if readable(rp + 0x70, 16) {
-                        RawPtr(rp + 0x70).write::<[f32; 4]>(yaw_quat(yaw));
+                        RawPtr(rp + 0x70).write::<[f32; 4]>(yaw_rot(yaw));
                     }
                 }
             }
@@ -573,7 +592,7 @@ fn write_step(from_ticker: bool) {
             let warped = !*MODE_RAW
                 && (warp_due || off_by > 2.0)
                 && (*YAW.lock())
-                    .map(yaw_quat)
+                    .map(yaw_rot)
                     .or_else(|| rot_of(t.ptr))
                     .map(|r| native_warp(t.ptr, desired, r))
                     .unwrap_or(false);
