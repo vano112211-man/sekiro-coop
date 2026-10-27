@@ -953,7 +953,132 @@ fn write_step(from_ticker: bool) {
 /// Hook point for the SetFlag detour.
 pub fn on_game_thread() {
     if *ENABLED {
+        spawn_step();
         write_step(false);
+    }
+}
+
+// ---------------------------------------------------------------- spawn
+
+/// Debug character creator (1.06, offline): `WorldChrMan` (global RVA
+/// 0x3d7a1e0) +0x3148 holds a `CSDebugChrCreator` (vftable 0x2a952a8), built by
+/// the WorldChrMan constructor and stepped by its update. Fields, as
+/// `CSDebugChrPerfChecker::_STEP_CreateChr` (0xc15f00) fills them:
+/// +0x118 NpcParam id, +0x114 ThinkParam id, +0x1a4 distance in front of the
+/// Hero, +0x1a8 height offset, +0x1ac angle. `0xc0f2a0(creator, model)` stores
+/// the model number at +0x1a0 when the creator is idle (+0x1b0 = 1) and
+/// starts the create (0xc10880: position from the Hero, name "c%04d", then
+/// load → create).
+const RVA_WORLD_CHR_MAN: usize = 0x3d7a1e0;
+const OFF_CHR_CREATOR: usize = 0x3148;
+const RVA_CHR_CREATOR_VT: usize = 0x2a952a8;
+const RVA_CHR_CREATOR_REQUEST: usize = 0xc0f2a0;
+const CHR_CREATOR_REQUEST_BYTES: [u8; 15] =
+    [0x80, 0xb9, 0xb0, 0x01, 0x00, 0x00, 0x00, 0x74, 0x0b, 0x89, 0x91, 0xa0, 0x01, 0x00, 0x00];
+type ChrCreatorRequestFn = unsafe extern "system" fn(creator: usize, model: u32);
+
+/// `SEKIRO_COOP_SPAWN=<model>[:<npc param>|auto[:<think param>]]`, e.g. `5060:auto`
+/// (Owl). `auto` takes the first NpcParam row in model*10000 .. +9999.
+static SPAWN: Lazy<Option<(u32, Option<u32>, Option<u32>)>> = Lazy::new(|| {
+    let v = std::env::var("SEKIRO_COOP_SPAWN").ok()?;
+    let mut it = v.split(':');
+    let model: u32 = it.next()?.trim().parse().ok()?;
+    let npc = match it.next().map(str::trim) {
+        None | Some("auto") | Some("") => None,
+        Some(n) => n.parse().ok(),
+    };
+    // Think param defaults to the NpcParam id (the usual pairing); the
+    // puppet's logic is switched off once it is pinned anyway.
+    let think = it.next().and_then(|t| t.trim().parse().ok());
+    Some((model, npc, think))
+});
+static SPAWN_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SPAWN_FIRST_SEEN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+pub static SPAWNED_NPC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn npc_rows_for(model: u32) -> Vec<u32> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let lo = model * 10_000;
+    let hi = lo + 9_999;
+    unsafe {
+        sekiro_sdk_sys::paramrepo::open_param(
+            sekiro_sdk_sys::paramrepo::SOLO_PARAM_REPOSITORY_RVA_V1_06,
+            base,
+            sekiro_sdk_sys::paramrepo::ParamKind::NpcParam,
+        )
+        .map(|t| t.rows().map(|(id, _)| id).filter(|id| (lo..=hi).contains(id)).collect())
+        .unwrap_or_default()
+    }
+}
+
+fn spawn_step() {
+    let Some((model, npc, think)) = *SPAWN else { return };
+    if SPAWN_DONE.load(Ordering::Relaxed) || hero_pos().is_none() {
+        return;
+    }
+    // Wait until the Hero has existed for 10 s (loading finished).
+    {
+        let mut first = SPAWN_FIRST_SEEN.lock();
+        let t = *first.get_or_insert_with(std::time::Instant::now);
+        if t.elapsed() < std::time::Duration::from_secs(10) {
+            return;
+        }
+    }
+    SPAWN_DONE.store(true, Ordering::Relaxed);
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let rows = npc_rows_for(model);
+    tracing::info!(model, candidates = ?rows, "spawn: NpcParam rows for this model");
+    let Some(npc) = npc.or_else(|| rows.first().copied()) else {
+        tracing::warn!(model, "spawn: no NpcParam row, not spawning");
+        return;
+    };
+    let think = think.unwrap_or(npc);
+    unsafe {
+        let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) else {
+            tracing::warn!("spawn: no WorldChrMan");
+            return;
+        };
+        let Some(creator) = read_ptr(wcm + OFF_CHR_CREATOR) else {
+            tracing::warn!("spawn: no ChrCreator at WorldChrMan+0x3148");
+            return;
+        };
+        let vt = read_checked::<usize>(creator);
+        let ready = read_checked::<u8>(creator + 0x1b0);
+        let f = base + RVA_CHR_CREATOR_REQUEST;
+        let bytes_ok = readable(f, CHR_CREATOR_REQUEST_BYTES.len())
+            && core::slice::from_raw_parts(f as *const u8, CHR_CREATOR_REQUEST_BYTES.len())
+                == CHR_CREATOR_REQUEST_BYTES;
+        tracing::info!(
+            creator = format!("{creator:#x}"),
+            vt_ok = vt == Some(base + RVA_CHR_CREATOR_VT),
+            ready = ?ready,
+            bytes_ok,
+            npc,
+            think,
+            "spawn: creator state"
+        );
+        if vt != Some(base + RVA_CHR_CREATOR_VT) || !bytes_ok || !readable(creator, 0x1c0) {
+            tracing::warn!("spawn: checks failed, not spawning");
+            return;
+        }
+        if ready != Some(1) {
+            tracing::warn!("spawn: creator not idle (+0x1b0 != 1); the game may not step it");
+            return;
+        }
+        RawPtr(creator + 0x118).write::<u32>(npc);
+        RawPtr(creator + 0x114).write::<u32>(think);
+        RawPtr(creator + 0x1a4).write::<f32>(4.0);
+        RawPtr(creator + 0x1a8).write::<f32>(0.0);
+        RawPtr(creator + 0x1ac).write::<f32>(0.0);
+        SPAWNED_NPC.store(npc, Ordering::Relaxed);
+        let req: ChrCreatorRequestFn = core::mem::transmute(f);
+        req(creator, model);
+        // Re-pick: the puppet should be the spawned character, not whatever
+        // was pinned before.
+        *TARGET.lock() = None;
+        *LAST_HANDLE.lock() = None;
+        *LAST_WRITTEN.lock() = None;
+        tracing::info!(model, npc, think, model_at = ?read_checked::<u32>(creator + 0x1a0), "spawn: requested");
     }
 }
 
@@ -1281,6 +1406,10 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         }
         let pick = same.or_else(|| rows.iter().find(|r| {
             let (d, _, _, c, team, _, _) = **r;
+            let spawned = SPAWNED_NPC.load(Ordering::Relaxed);
+            if spawned != 0 {
+                return c == spawned;
+            }
             match *PIN_CHAR {
                 Some(want) => c == want,
                 None => team == 6 && c != 0 && d > 0.5 && d < PICK_RADIUS_M,
