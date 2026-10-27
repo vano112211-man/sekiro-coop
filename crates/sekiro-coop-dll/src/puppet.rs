@@ -487,26 +487,80 @@ unsafe fn action_step(chr: usize, moving: bool) {
             if !moving && now.duration_since(since) >= std::time::Duration::from_secs(1) {
                 *REST_ANIM.lock() = Some(a);
             }
+            catalog_step(chr, moving, now.duration_since(since));
         }
         _ => {
             *REMOTE_ANIM.lock() = Some((a, now));
-            let rest = *REST_ANIM.lock();
-            let force = *ACTION_ANIM != 0
-                && !moving
-                && prev.is_some()
-                && rest.is_some()
-                && rest != Some(a)
-                && !action_playing();
-            let forced = force && force_anim(chr, *ACTION_ANIM);
+            // Run 21: the remote's own id says which action it is. Play the
+            // mapped puppet animation (attacks while moving too).
+            let mapped = ACTION_MAP.iter().find(|(from, _)| *from == a).map(|(_, to)| *to);
+            let forced = match mapped {
+                Some(to) if to != 0 && !action_playing() => force_anim(chr, to),
+                _ => false,
+            };
             if forced {
                 *LAST_FORCE_AT.lock() = Some(now);
-                *FORCE_CHECK.lock() = Some((now, *ACTION_ANIM));
+                *FORCE_CHECK.lock() = Some((now, mapped.unwrap_or(0)));
             }
             let mut ev = ANIM_EVENTS.lock();
             if ev.len() < 64 {
                 ev.push((now.duration_since(*T0).as_millis(), prev.map(|p| p.0).unwrap_or(0), a, moving, forced));
             }
         }
+    }
+}
+
+/// Remote animation id → puppet animation id (0 = play nothing).
+/// Default from run 21 (owner's test order, derived): 790040 = attack,
+/// 50203000 = block, 201001 = jump (the position already lifts the puppet),
+/// 213300/213301 = dodge. Override: `SEKIRO_COOP_PUPPET_MAP=790040:3000,...`.
+static ACTION_MAP: Lazy<Vec<(u32, u32)>> = Lazy::new(|| {
+    let spec = std::env::var("SEKIRO_COOP_PUPPET_MAP")
+        .unwrap_or_else(|_| "790040:3000".to_string());
+    spec.split(',')
+        .filter_map(|kv| {
+            let (k, v) = kv.split_once(':')?;
+            Some((k.trim().parse().ok()?, v.trim().parse().ok()?))
+        })
+        .collect()
+});
+
+/// Catalog: while the remote stands still, play candidate puppet animations
+/// one by one so the owner can say which looks like a block, a dodge, a jump.
+/// `SEKIRO_COOP_PUPPET_CATALOG=id,id,...` (empty = off).
+static CATALOG: Lazy<Vec<u32>> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_CATALOG")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect()
+});
+static CATALOG_NEXT: AtomicUsize = AtomicUsize::new(0);
+static CATALOG_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+unsafe fn catalog_step(chr: usize, moving: bool, still_for: std::time::Duration) {
+    if CATALOG.is_empty() || moving || still_for < std::time::Duration::from_secs(3) {
+        return;
+    }
+    if T0.elapsed() < std::time::Duration::from_secs(15) {
+        return;
+    }
+    let due = CATALOG_LAST
+        .lock()
+        .map(|t| t.elapsed() >= std::time::Duration::from_millis(3000))
+        .unwrap_or(true);
+    if !due {
+        return;
+    }
+    let i = CATALOG_NEXT.load(Ordering::Relaxed);
+    let Some(&id) = CATALOG.get(i) else { return };
+    let now = std::time::Instant::now();
+    *CATALOG_LAST.lock() = Some(now);
+    CATALOG_NEXT.store(i + 1, Ordering::Relaxed);
+    if force_anim(chr, id) {
+        *LAST_FORCE_AT.lock() = Some(now);
+        *FORCE_CHECK.lock() = Some((now, id));
+        tracing::info!(number = i + 1, of = CATALOG.len(), id, "puppet catalog play");
     }
 }
 
