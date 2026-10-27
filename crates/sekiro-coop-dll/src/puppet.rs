@@ -81,9 +81,15 @@ static MIRRORS: Lazy<Vec<usize>> = Lazy::new(|| {
 static MODE_RAW: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_MODE").map(|v| v == "raw").unwrap_or(false)
 });
+/// Hybrid (default): native warp at most every `SEKIRO_COOP_PUPPET_WARP_MS`
+/// (default 500) or when the puppet is more than 2 m from where it should be;
+/// raw physics-position steps every 8 ms in between. Warping every frame made
+/// the puppet flicker (run 9).
 static WARP_MS: Lazy<u64> = Lazy::new(|| {
-    std::env::var("SEKIRO_COOP_PUPPET_WARP_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(33)
+    std::env::var("SEKIRO_COOP_PUPPET_WARP_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(500)
 });
+static LAST_WARP_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static RAW_STEPS: AtomicU64 = AtomicU64::new(0);
 /// Turn the puppet's own logic (AI) off: ChrCmd_EnableLogic clears bit 0 of
 /// `[ChrIns+0x50]+0x190`. Default on; `SEKIRO_COOP_PUPPET_LOGIC_OFF=0` keeps it.
 static LOGIC_OFF: Lazy<bool> = Lazy::new(|| {
@@ -301,8 +307,7 @@ fn write_step(from_ticker: bool) {
         let mut last = LAST_WRITE_AT.lock();
         let now = std::time::Instant::now();
         if let Some(prev) = *last {
-            let gap = if *MODE_RAW { 8 } else { *WARP_MS };
-            if now.duration_since(prev) < std::time::Duration::from_millis(gap) {
+            if now.duration_since(prev) < std::time::Duration::from_millis(8) {
                 return;
             }
         }
@@ -348,10 +353,22 @@ fn write_step(from_ticker: bool) {
             if *LOGIC_OFF {
                 logic_off(t.ptr);
             }
+            let off_by = dist([cur[0], 0.0, cur[2]], [desired[0], 0.0, desired[2]]);
+            let warp_due = {
+                let last_warp = *LAST_WARP_AT.lock();
+                match last_warp {
+                    None => true,
+                    Some(w) => w.elapsed() >= std::time::Duration::from_millis(*WARP_MS),
+                }
+            };
             let warped = !*MODE_RAW
+                && (warp_due || off_by > 2.0)
                 && rot_of(t.ptr).map(|r| native_warp(t.ptr, desired, r)).unwrap_or(false);
-            if !warped {
+            if warped {
+                *LAST_WARP_AT.lock() = Some(std::time::Instant::now());
+            } else {
                 RawPtr(p).write::<[f32; 3]>(desired);
+                RAW_STEPS.fetch_add(1, Ordering::Relaxed);
             }
             for (i, off) in MIRRORS.iter().enumerate() {
                 let a = t.ptr + off;
@@ -585,6 +602,8 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         height_resets = RESCUED.load(Ordering::Relaxed),
         mode = if *MODE_RAW { "raw" } else { "warp" },
         warps = WARPS.load(Ordering::Relaxed),
+        raw_steps = RAW_STEPS.load(Ordering::Relaxed),
+        warp_ms = *WARP_MS,
         warp_refused = WARP_REFUSED.load(Ordering::Relaxed),
         logic_writes = LOGIC_WRITES.load(Ordering::Relaxed),
         logic_now = ?t.and_then(|t| unsafe { read_ptr(t.ptr + 0x50).and_then(|c| read_checked::<u8>(c + 0x190)) }),
