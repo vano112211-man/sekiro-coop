@@ -585,11 +585,25 @@ fn write_step(from_ticker: bool) {
                 } else {
                     let since = mt.map(|(_, s)| s).unwrap_or(now);
                     drop(mt);
+                    let still_for = now.duration_since(since);
                     if TARGET_MOVING.load(Ordering::Relaxed)
-                        && now.duration_since(since) >= std::time::Duration::from_millis(200)
+                        && still_for >= std::time::Duration::from_millis(200)
                     {
                         TARGET_MOVING.store(false, Ordering::Relaxed);
                         if *RESET_ANIM && reset_anim(t.ptr) {
+                            STOP_RESETS.fetch_add(1, Ordering::Relaxed);
+                            *LAST_RESET_AT.lock() = Some(now);
+                        }
+                    } else if !TARGET_MOVING.load(Ordering::Relaxed)
+                        && still_for < std::time::Duration::from_millis(1700)
+                    {
+                        // Follow-up resets shortly after a stop, in case the
+                        // game restarted the run cycle (run 18: rare leftovers).
+                        let again = LAST_RESET_AT
+                            .lock()
+                            .map(|t| now.duration_since(t) >= std::time::Duration::from_millis(400))
+                            .unwrap_or(true);
+                        if again && *RESET_ANIM && reset_anim(t.ptr) {
                             STOP_RESETS.fetch_add(1, Ordering::Relaxed);
                             *LAST_RESET_AT.lock() = Some(now);
                         }
@@ -649,8 +663,11 @@ fn write_step(from_ticker: bool) {
                     Some(w) => w.elapsed() >= std::time::Duration::from_millis(*WARP_MS),
                 }
             };
+            // While the target stands still, only warp to fix a big error: a
+            // warp reads as movement and can restart the run cycle.
+            let moving = TARGET_MOVING.load(Ordering::Relaxed);
             let warped = !*MODE_RAW
-                && (warp_due || off_by > 2.0)
+                && ((warp_due && moving) || off_by > 2.0)
                 && (*YAW.lock())
                     .map(yaw_rot)
                     .or_else(|| rot_of(t.ptr))
