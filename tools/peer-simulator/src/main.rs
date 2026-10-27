@@ -19,7 +19,7 @@ use sekiro_coop_authority::table::PeerId;
 use sekiro_coop_net::lobby::Lobby;
 use sekiro_coop_net::session::{HandshakeOutcome, Session, SessionConfig};
 use sekiro_coop_net::transport::UdpTransport;
-use sekiro_coop_net::wire::{EnemyState, PacketBody, PacketType, PlayerSnapshot};
+use sekiro_coop_net::wire::{EnemyState, HandshakePayload, PacketBody, PacketType, PlayerSnapshot};
 
 fn usage() {
     eprintln!(
@@ -182,7 +182,7 @@ fn main() -> ExitCode {
                     // (run 11: silence → "peer grace expired").
                     let _ = session.tick_heartbeat(frame);
                     thread::sleep(tick_period);
-                    poll_only(&mut session, &mut history, mirror);
+                    poll_only(&mut session, &mut history, mirror, role);
                     continue;
                 }
             }
@@ -238,6 +238,9 @@ fn main() -> ExitCode {
         while let Ok(Some((header, body))) = session.poll_packet(&mut buf) {
             tracing::debug!(?header.packet_type, "rx");
             match body {
+                PacketBody::Handshake(hp) => {
+                    answer_handshake(&session, role, &hp);
+                }
                 PacketBody::PlayerSnapshot(s) => {
                     if mirror {
                         history.push_back((Instant::now(), s.position, s.animation_id));
@@ -315,13 +318,39 @@ fn poll_only<T: sekiro_coop_net::transport::Transport>(
     session: &mut Session<T>,
     history: &mut std::collections::VecDeque<(Instant, [f32; 3], u32)>,
     mirror: bool,
+    role: PeerId,
 ) {
     let mut buf = vec![0u8; 64 * 1024];
     while let Ok(Some((_header, body))) = session.poll_packet(&mut buf) {
-        if let PacketBody::PlayerSnapshot(s) = body {
-            if mirror {
+        match body {
+            PacketBody::Handshake(hp) => answer_handshake(session, role, &hp),
+            PacketBody::PlayerSnapshot(s) if mirror => {
                 history.push_back((Instant::now(), s.position, s.animation_id));
             }
+            _ => {}
         }
+    }
+}
+
+/// The DLL re-sends its Handshake until it receives ours. Our single
+/// handshake can be lost when it is sent before the DLL's socket is bound
+/// (run 12: os error 10054, then the DLL timed out forever while we thought
+/// the session was up). Answer every retry with our payload again.
+fn answer_handshake<T: sekiro_coop_net::transport::Transport>(
+    session: &Session<T>,
+    role: PeerId,
+    remote: &HandshakePayload,
+) {
+    let reply = HandshakePayload {
+        mod_version: sekiro_coop_net::MOD_VERSION.into(),
+        game_version: "1.06".into(),
+        save_hash: 0xDEADBEEF,
+        game_cycle: 0,
+        match_seed: remote.match_seed,
+        peer: role,
+    };
+    match session.send_reliable(PacketType::Handshake, &PacketBody::Handshake(reply)) {
+        Ok(_) => tracing::info!("answered a handshake retry from the DLL"),
+        Err(e) => tracing::warn!(%e, "handshake reply failed"),
     }
 }

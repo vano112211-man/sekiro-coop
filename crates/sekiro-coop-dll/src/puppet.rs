@@ -422,7 +422,15 @@ fn write_step(from_ticker: bool) {
                         (r[0], r[1], r[2])
                     }
                     None => {
+                        // No network position: hold still where it was last
+                        // put (or where it stands now), instead of letting its
+                        // last animation carry it away (run 12).
                         REMOTE_STALE_STEPS.fetch_add(1, Ordering::Relaxed);
+                        let hold = last.unwrap_or(cur);
+                        if last.is_none() {
+                            *last = Some(hold);
+                        }
+                        RawPtr(p).write::<[f32; 3]>(hold);
                         return;
                     }
                 }
