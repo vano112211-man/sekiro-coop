@@ -72,9 +72,35 @@ static MIRRORS: Lazy<Vec<usize>> = Lazy::new(|| {
             .filter_map(|x| usize::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok())
             .take(4)
             .collect(),
-        Err(_) => vec![0x1050, 0x1060],
+        Err(_) => Vec::new(),
     }
 });
+/// `warp` (default): move the puppet with the game's own
+/// ChrIns::Warp (vtable +0x6A0, found in EventChrEntity::Warp). `raw`: the
+/// old physics-module position write.
+static MODE_RAW: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_MODE").map(|v| v == "raw").unwrap_or(false)
+});
+static WARP_MS: Lazy<u64> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_WARP_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(33)
+});
+/// Turn the puppet's own logic (AI) off: ChrCmd_EnableLogic clears bit 0 of
+/// `[ChrIns+0x50]+0x190`. Default on; `SEKIRO_COOP_PUPPET_LOGIC_OFF=0` keeps it.
+static LOGIC_OFF: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_LOGIC_OFF").map(|v| v != "0").unwrap_or(true)
+});
+static SCAN: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_SCAN").map(|v| v == "1").unwrap_or(false)
+});
+/// Sekiro 1.06 (exe SHA-256 637aca52…, PE stamp 0x5fa3e066) RVAs, read from a
+/// memory image: ChrIns/EnemyIns/PlayerIns vtable slot +0x6A0 → 0x9f81f0.
+const RVA_CHR_WARP: usize = 0x9f81f0;
+const VT_SLOT_WARP: usize = 0x6A0;
+type ChrWarpFn = unsafe extern "system" fn(chr: usize, pos: *const [f32; 4], rot: *const [f32; 4], a: u8, b: u8);
+static WARPS: AtomicU64 = AtomicU64::new(0);
+static IN_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WARP_REFUSED: AtomicU64 = AtomicU64::new(0);
+static LOGIC_WRITES: AtomicU64 = AtomicU64::new(0);
 static MIRROR_OVERWRITTEN: [AtomicU64; 4] =
     [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static WRITER_TICKER: Lazy<bool> = Lazy::new(|| {
@@ -210,6 +236,42 @@ fn heading_update(hero: [f32; 3]) -> [f32; 2] {
     g.0
 }
 
+/// Call ChrIns::Warp(pos, rot, 1, 0) on the game thread, but only after
+/// checking that the object's vtable slot +0x6A0 points at the 1.06 function.
+unsafe fn native_warp(chr: usize, pos: [f32; 3], rot: [f32; 4]) -> bool {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let Some(vt) = read_ptr(chr) else { return false };
+    let Some(f) = read_checked::<usize>(vt + VT_SLOT_WARP) else { return false };
+    if base == 0 || f != base + RVA_CHR_WARP {
+        WARP_REFUSED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let p: [f32; 4] = [pos[0], pos[1], pos[2], 1.0];
+    let warp: ChrWarpFn = core::mem::transmute(f);
+    warp(chr, &p, &rot, 1, 0);
+    WARPS.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Puppet rotation: the physics module keeps a quaternion at +0x70.
+unsafe fn rot_of(chr: usize) -> Option<[f32; 4]> {
+    let sm = read_ptr(chr + 0x1ff8)?;
+    let phys = read_ptr(sm + 0x68)?;
+    read_checked::<[f32; 4]>(phys + 0x70)
+}
+
+/// EnableLogic(false) for this one character: clear bit 0 of ChrCtrl+0x190.
+unsafe fn logic_off(chr: usize) {
+    if let Some(ctrl) = read_ptr(chr + 0x50) {
+        if let Some(b) = read_checked::<u8>(ctrl + 0x190) {
+            if b & 1 != 0 {
+                RawPtr(ctrl + 0x190).write::<u8>(b & 0xfe);
+                LOGIC_WRITES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- writer
 
 /// Hold the pinned target beside the Hero. Called from the SetFlag detour
@@ -218,6 +280,17 @@ fn write_step(from_ticker: bool) {
     if !*ENABLED || from_ticker != *WRITER_TICKER {
         return;
     }
+    // The native warp may itself call SetFlag (our detour). Never re-enter.
+    if IN_STEP.swap(true, Ordering::Acquire) {
+        return;
+    }
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            IN_STEP.store(false, Ordering::Release);
+        }
+    }
+    let _clear = Clear;
     let Some(t) = *TARGET.lock() else { return };
     if CUR_FRAME.load(Ordering::Relaxed) < PAUSE_UNTIL.load(Ordering::Relaxed) {
         return;
@@ -228,7 +301,8 @@ fn write_step(from_ticker: bool) {
         let mut last = LAST_WRITE_AT.lock();
         let now = std::time::Instant::now();
         if let Some(prev) = *last {
-            if now.duration_since(prev) < std::time::Duration::from_millis(8) {
+            let gap = if *MODE_RAW { 8 } else { *WARP_MS };
+            if now.duration_since(prev) < std::time::Duration::from_millis(gap) {
                 return;
             }
         }
@@ -271,7 +345,14 @@ fn write_step(from_ticker: bool) {
                 cur[1]
             };
             let desired = [hero[0] + h[0] * *OFFSET_M, y, hero[2] + h[1] * *OFFSET_M];
-            RawPtr(p).write::<[f32; 3]>(desired);
+            if *LOGIC_OFF {
+                logic_off(t.ptr);
+            }
+            let warped = !*MODE_RAW
+                && rot_of(t.ptr).map(|r| native_warp(t.ptr, desired, r)).unwrap_or(false);
+            if !warped {
+                RawPtr(p).write::<[f32; 3]>(desired);
+            }
             for (i, off) in MIRRORS.iter().enumerate() {
                 let a = t.ptr + off;
                 if !readable(a, 12) {
@@ -387,7 +468,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     // both scans are stable fields rather than coincidences.
     // Copy the target out so the lock is not held during a scan (the game
     // thread takes TARGET on every SetFlag call).
-    let tgt = *TARGET.lock();
+    let tgt = if *SCAN { *TARGET.lock() } else { None };
     if let Some(t) = tgt {
         let since = frame.saturating_sub(PINNED_AT.load(Ordering::Relaxed));
         // "C": from the ChrIns, as before. "P": from the physics module
@@ -502,6 +583,11 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         stale = STALE.load(Ordering::Relaxed),
         repins = REPINS.load(Ordering::Relaxed),
         height_resets = RESCUED.load(Ordering::Relaxed),
+        mode = if *MODE_RAW { "raw" } else { "warp" },
+        warps = WARPS.load(Ordering::Relaxed),
+        warp_refused = WARP_REFUSED.load(Ordering::Relaxed),
+        logic_writes = LOGIC_WRITES.load(Ordering::Relaxed),
+        logic_now = ?t.and_then(|t| unsafe { read_ptr(t.ptr + 0x50).and_then(|c| read_checked::<u8>(c + 0x190)) }),
         mirrors = ?MIRRORS.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>(),
         mirror_overwritten = ?MIRROR_OVERWRITTEN.iter().take(MIRRORS.len()).map(|c| c.load(Ordering::Relaxed)).collect::<Vec<_>>(),
         freeze_ai_before = ?*FREEZE_AI_BEFORE.lock(),
