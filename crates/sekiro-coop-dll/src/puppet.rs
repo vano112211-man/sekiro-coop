@@ -493,9 +493,12 @@ fn map_action(id: u32) -> Option<u32> {
             2 => 3005,
             _ => 3006,
         }),
-        // Jump, jump attack, dodge, block: c1020 has no lookalike (run 24: 3002
-        // reads as a plain strike, 3004 as an arc swing). The position path
-        // already lifts the puppet for a jump.
+        // Owl (c5060) puppet, run 28 slow catalog (owner): 3093 = block,
+        // 3063 = dodge (not sure). Parry: no own lookalike found, block used.
+        // Jump: none picked (too many jump attacks); the position path lifts it.
+        50203000 => Some(3093),         // block (start; 50203010/12 follow)
+        50002000 => Some(3093),         // parry (guess: run 23 order)
+        213300 | 213301 => Some(3063),  // dodge / step
         _ => None,
     }
 }
