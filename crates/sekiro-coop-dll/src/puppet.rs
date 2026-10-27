@@ -152,6 +152,34 @@ const RVA_CHR_RESET_ANIM: usize = 0x9f4c60;
 const RESET_ANIM_BYTES: [u8; 14] =
     [0x48, 0x8b, 0x81, 0xf8, 0x1f, 0x00, 0x00, 0x48, 0x8b, 0x48, 0x28, 0x48, 0x85, 0xc9];
 type ChrResetAnimFn = unsafe extern "system" fn(chr: usize);
+
+/// Script command ForcePlayAnimation, offline (1.06): `ComCmd_ForcePlayAnimation`
+/// → `EventChrEntity::vt[+0x38]` (0x750e00) → `0xbd84c0(module, anim_id)` with
+/// `module = [[ChrIns+0x1ff8]+0x58]`. It stores the id at module+0x10 and in
+/// the owner's request slot; the game starts the animation on its next update.
+const RVA_FORCE_PLAY_ANIM: usize = 0xbd84c0;
+const FORCE_PLAY_ANIM_BYTES: [u8; 11] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x8b, 0xda, 0x89, 0x51, 0x10];
+type ForcePlayAnimFn = unsafe extern "system" fn(module: usize, anim_id: u32);
+
+/// Animation the puppet plays when the remote player starts an action.
+/// `SEKIRO_COOP_PUPPET_ACTION_ANIM` (default 3000, an enemy attack seen in run 8;
+/// 0 = off).
+static ACTION_ANIM: Lazy<u32> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_ACTION_ANIM").ok().and_then(|v| v.parse().ok()).unwrap_or(3000)
+});
+static LAST_FORCE_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static FORCES: AtomicU64 = AtomicU64::new(0);
+static FORCE_REFUSED: AtomicU64 = AtomicU64::new(0);
+static RESETS_HELD: AtomicU64 = AtomicU64::new(0);
+/// Remote animation tracking: (current id, since), and the id it shows at rest.
+static REMOTE_ANIM: Mutex<Option<(u32, std::time::Instant)>> = Mutex::new(None);
+static REST_ANIM: Mutex<Option<u32>> = Mutex::new(None);
+/// Transitions to print from the ticker: (ms since start, from, to, moving, forced).
+static ANIM_EVENTS: Mutex<Vec<(u128, u32, u32, bool, bool)>> = Mutex::new(Vec::new());
+static ANIM_EVENTS_LOGGED: AtomicU64 = AtomicU64::new(0);
+static T0: Lazy<std::time::Instant> = Lazy::new(std::time::Instant::now);
+/// After a force: check the puppet's own animation a little later.
+static FORCE_CHECK: Mutex<Option<(std::time::Instant, u32)>> = Mutex::new(None);
 static RESET_ANIM: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_RESET_ANIM").map(|v| v != "0").unwrap_or(true)
 });
@@ -377,6 +405,10 @@ unsafe fn reset_anim(chr: usize) -> bool {
     if base == 0 {
         return false;
     }
+    if action_playing() {
+        RESETS_HELD.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
     let f = base + RVA_CHR_RESET_ANIM;
     let ok = readable(f, RESET_ANIM_BYTES.len())
         && core::slice::from_raw_parts(f as *const u8, RESET_ANIM_BYTES.len()) == RESET_ANIM_BYTES;
@@ -393,6 +425,89 @@ unsafe fn reset_anim(chr: usize) -> bool {
     reset(chr);
     ANIM_RESETS.fetch_add(1, Ordering::Relaxed);
     true
+}
+
+/// Call the native ForcePlayAnimation once its first bytes match 1.06.
+unsafe fn force_anim(chr: usize, anim_id: u32) -> bool {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    if base == 0 {
+        return false;
+    }
+    let f = base + RVA_FORCE_PLAY_ANIM;
+    let ok = readable(f, FORCE_PLAY_ANIM_BYTES.len())
+        && core::slice::from_raw_parts(f as *const u8, FORCE_PLAY_ANIM_BYTES.len()) == FORCE_PLAY_ANIM_BYTES;
+    if !ok {
+        FORCE_REFUSED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let Some(module) = read_ptr(chr + 0x1ff8).and_then(|sm| read_ptr(sm + 0x58)) else {
+        FORCE_REFUSED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    };
+    if !readable(module, 0x18) {
+        FORCE_REFUSED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let play: ForcePlayAnimFn = core::mem::transmute(f);
+    play(module, anim_id);
+    FORCES.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// True for 1.5 s after a forced action, so stop/periodic resets do not cut it.
+fn action_playing() -> bool {
+    LAST_FORCE_AT
+        .lock()
+        .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
+        .unwrap_or(false)
+}
+
+fn remote_anim() -> Option<u32> {
+    let fresh = REMOTE_SEEN_AT
+        .lock()
+        .map(|t| t.elapsed() < std::time::Duration::from_secs(1))
+        .unwrap_or(false);
+    if !fresh {
+        return None;
+    }
+    let m = crate::global()?;
+    let snap = m.remote_player.lock().clone()?;
+    Some(snap.animation_id)
+}
+
+/// Remote animation changes: log them, learn the id it shows at rest, and
+/// when it starts something else while standing, play the action animation.
+unsafe fn action_step(chr: usize, moving: bool) {
+    let Some(a) = remote_anim() else { return };
+    let now = std::time::Instant::now();
+    let prev = *REMOTE_ANIM.lock();
+    match prev {
+        Some((cur, since)) if cur == a => {
+            // Unchanged: after 1 s standing still this is the rest animation.
+            if !moving && now.duration_since(since) >= std::time::Duration::from_secs(1) {
+                *REST_ANIM.lock() = Some(a);
+            }
+        }
+        _ => {
+            *REMOTE_ANIM.lock() = Some((a, now));
+            let rest = *REST_ANIM.lock();
+            let force = *ACTION_ANIM != 0
+                && !moving
+                && prev.is_some()
+                && rest.is_some()
+                && rest != Some(a)
+                && !action_playing();
+            let forced = force && force_anim(chr, *ACTION_ANIM);
+            if forced {
+                *LAST_FORCE_AT.lock() = Some(now);
+                *FORCE_CHECK.lock() = Some((now, *ACTION_ANIM));
+            }
+            let mut ev = ANIM_EVENTS.lock();
+            if ev.len() < 64 {
+                ev.push((now.duration_since(*T0).as_millis(), prev.map(|p| p.0).unwrap_or(0), a, moving, forced));
+            }
+        }
+    }
 }
 
 /// Physics module +0x70 is NOT a quaternion: for the Hero it reads
@@ -674,6 +789,9 @@ fn write_step(from_ticker: bool) {
             // While the target stands still, only warp to fix a big error: a
             // warp reads as movement and can restart the run cycle.
             let moving = TARGET_MOVING.load(Ordering::Relaxed);
+            if *SOURCE_NET {
+                action_step(t.ptr, moving);
+            }
             let warped = !*MODE_RAW
                 && ((warp_due && moving) || off_by > 2.0)
                 && (*YAW.lock())
@@ -816,6 +934,23 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
             }
         }
     }
+    // Remote animation transitions and the result of each forced action.
+    {
+        let evs: Vec<_> = std::mem::take(&mut *ANIM_EVENTS.lock());
+        for (ms, from, to, moving, forced) in evs {
+            if ANIM_EVENTS_LOGGED.fetch_add(1, Ordering::Relaxed) < 600 {
+                tracing::info!(t_ms = ms as u64, from, to, moving, forced, rest = ?*REST_ANIM.lock(), "puppet remote anim");
+            }
+        }
+        let due = FORCE_CHECK
+            .lock()
+            .filter(|(at, _)| at.elapsed() >= std::time::Duration::from_millis(300));
+        if let Some((_, want)) = due {
+            *FORCE_CHECK.lock() = None;
+            let now_anim = (*TARGET.lock()).and_then(|t| unsafe { anim_of(t.ptr) });
+            tracing::info!(want, puppet_anim = ?now_anim, "puppet forced action check");
+        }
+    }
     if frame % 60 != 0 {
         return;
     }
@@ -914,6 +1049,13 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         anim_resets = ANIM_RESETS.load(Ordering::Relaxed),
         stop_resets = STOP_RESETS.load(Ordering::Relaxed),
         anim_reset_refused = ANIM_RESET_REFUSED.load(Ordering::Relaxed),
+        action_anim = *ACTION_ANIM,
+        forces = FORCES.load(Ordering::Relaxed),
+        force_refused = FORCE_REFUSED.load(Ordering::Relaxed),
+        resets_held = RESETS_HELD.load(Ordering::Relaxed),
+        remote_anim = ?remote_anim(),
+        rest_anim = ?*REST_ANIM.lock(),
+        puppet_anim = ?t.and_then(|t| unsafe { anim_of(t.ptr) }),
         yaw_deg = ?YAW.lock().map(|y| y.to_degrees()),
         puppet_rot = ?t.and_then(|t| unsafe { rot_of(t.ptr) }),
         hero_rot = ?hero_rot(),
