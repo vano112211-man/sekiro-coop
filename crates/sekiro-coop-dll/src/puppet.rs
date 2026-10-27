@@ -88,6 +88,13 @@ static TEAM_BEFORE: Mutex<Option<u8>> = Mutex::new(None);
 static TEAM_WRITES: AtomicU64 = AtomicU64::new(0);
 static REPINS: AtomicU64 = AtomicU64::new(0);
 static RESCUED: AtomicU64 = AtomicU64::new(0);
+/// Frame at which the current target was pinned (for scan scheduling).
+static PINNED_AT: AtomicU64 = AtomicU64::new(0);
+/// While non-zero, writes are paused until this frame (lets every copy of
+/// the position settle to the game's own value before a mirror scan).
+static PAUSE_UNTIL: AtomicU64 = AtomicU64::new(0);
+static CUR_FRAME: AtomicU64 = AtomicU64::new(0);
+static SCANS_DONE: AtomicU64 = AtomicU64::new(0);
 static LAST_WRITE_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static WRITES: AtomicU64 = AtomicU64::new(0);
 static OVERWRITTEN: AtomicU64 = AtomicU64::new(0);
@@ -196,6 +203,9 @@ fn write_step(from_ticker: bool) {
         return;
     }
     let Some(t) = *TARGET.lock() else { return };
+    if CUR_FRAME.load(Ordering::Relaxed) < PAUSE_UNTIL.load(Ordering::Relaxed) {
+        return;
+    }
     // At most one write per ~8 ms: SetFlag fires several times per frame,
     // and writing every call cost frame time without moving the puppet more.
     {
@@ -269,6 +279,69 @@ pub fn on_game_thread() {
     }
 }
 
+// ---------------------------------------------------------------- mirror scan
+
+/// Breadth-first walk from the target ChrIns through every pointer-looking
+/// field (VirtualQuery-checked), logging every place a float triple equals
+/// the physics-module position within 2 cm. Finds the other copies of the
+/// position (physics engine proxy, render transforms) that keep reverting
+/// our writes. Read-only.
+fn mirror_scan(t: Target, label: &str) {
+    use std::collections::{HashSet, VecDeque};
+    let Some(pa) = (unsafe { phys_pos_addr(t.ptr) }) else { return };
+    let p: [f32; 3] = unsafe { RawPtr(pa).read() };
+    let close = |a: f32, b: f32| (a - b).abs() < 0.02;
+
+    const MAX_NODES: usize = 4000;
+    const MAX_DEPTH: usize = 3;
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut q: VecDeque<(usize, usize, String)> = VecDeque::new();
+    q.push_back((t.ptr, 0, "chr".to_string()));
+    seen.insert(t.ptr);
+    let mut hits: Vec<String> = Vec::new();
+    let mut nodes = 0usize;
+
+    while let Some((obj, depth, path)) = q.pop_front() {
+        nodes += 1;
+        if nodes > MAX_NODES {
+            break;
+        }
+        // ChrIns is large; nested objects get a smaller window.
+        let len: usize = if depth == 0 { 0x2400 } else { 0x600 };
+        let mut off = 0usize;
+        while off + 12 <= len {
+            let a = obj + off;
+            if off % 0x200 == 0 && !readable(a, 0x200.min(len - off)) {
+                off += 0x200;
+                continue;
+            }
+            let v: [f32; 3] = unsafe { RawPtr(a).read() };
+            if close(v[0], p[0]) && close(v[1], p[1]) && close(v[2], p[2]) {
+                hits.push(format!("{path}+{off:#x}"));
+            }
+            if depth < MAX_DEPTH && off % 8 == 0 {
+                let ptr: usize = unsafe { RawPtr(a).read() };
+                if ptr >= 0x10000 && ptr < 0x7FFF_FFFF_0000 && ptr % 8 == 0 && !seen.contains(&ptr) {
+                    if readable(ptr, 16) {
+                        seen.insert(ptr);
+                        q.push_back((ptr, depth + 1, format!("{path}+{off:#x}>")));
+                    }
+                }
+            }
+            off += 4;
+        }
+    }
+    SCANS_DONE.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(
+        scan = label,
+        pos = ?p,
+        nodes,
+        hit_count = hits.len(),
+        hits = ?hits.iter().take(60).collect::<Vec<_>>(),
+        "puppet mirror scan"
+    );
+}
+
 // ---------------------------------------------------------------- survey
 
 /// Called from `on_frame` (ticker thread) every frame.
@@ -277,7 +350,26 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         return;
     }
     let _ = TICKER_TID.set(format!("{:?}", std::thread::current().id()));
+    CUR_FRAME.store(frame, Ordering::Relaxed);
     write_step(true);
+
+    // Mirror scans: pause writes 2 s after pinning, scan 1 s later ("A"),
+    // again 10 s after that ("B") with the same pause, so hits present in
+    // both scans are stable fields rather than coincidences.
+    // Copy the target out so the lock is not held during a scan (the game
+    // thread takes TARGET on every SetFlag call).
+    let tgt = *TARGET.lock();
+    if let Some(t) = tgt {
+        let since = frame.saturating_sub(PINNED_AT.load(Ordering::Relaxed));
+        for (start, label) in [(120u64, "A"), (720u64, "B")] {
+            if since == start {
+                PAUSE_UNTIL.store(frame + 60, Ordering::Relaxed);
+            }
+            if since == start + 60 {
+                mirror_scan(t, label);
+            }
+        }
+    }
     if frame % 60 != 0 {
         return;
     }
@@ -345,6 +437,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
             let t = Target { handle: r.1, ptr: r.2, char_id: r.3 };
             *TARGET.lock() = Some(t);
             *LAST_WRITTEN.lock() = None;
+            PINNED_AT.store(frame, Ordering::Relaxed);
             tracing::info!(handle = t.handle, char_id = t.char_id, dist = r.0, "puppet target pinned");
         }
     }
