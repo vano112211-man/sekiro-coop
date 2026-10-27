@@ -79,6 +79,7 @@ type WarpBonfireFn = unsafe extern "system" fn(proxy: usize, warp_id: u32, unk: 
 /// original.
 extern "system" fn setflag_detour(this: usize, flag_id: u32, value: u8, unk: u32) -> u8 {
     SETFLAG_CALLS.fetch_add(1, Ordering::Relaxed);
+    crate::puppet::on_game_thread();
     // Cache the EventFlagMan `this` pointer so remote-apply has
     // something valid to pass when it calls the trampoline.
     if EVENT_FLAG_MAN_PTR.load(Ordering::Relaxed) == 0 && this != 0 {

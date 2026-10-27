@@ -8,6 +8,7 @@
 
 pub mod hooks;
 pub mod overlay;
+pub mod puppet;
 pub mod tick;
 
 use once_cell::sync::OnceCell;
@@ -231,6 +232,7 @@ pub fn on_attach() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"), log_path.display());
 
     let m = find_current_module("sekiro.exe")?;
+    puppet::MODULE_BASE.store(m.base, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: `m` describes the loaded sekiro.exe image; reading its
     // bytes is safe as long as the process is our own.
     let version = unsafe {
@@ -365,6 +367,7 @@ fn start_session_from_env(m: &'static Mod) -> anyhow::Result<()> {
 pub fn on_frame() {
     let Some(m) = global() else { return };
     let frame = m.advance_frame();
+    puppet::on_tick(m, frame);
 
     // Drain bridge events for this tick BEFORE flushing subscribers —
     // a flush would push an unrelated `Tick` marker we don't need to
