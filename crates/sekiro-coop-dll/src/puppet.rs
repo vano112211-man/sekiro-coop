@@ -995,6 +995,11 @@ static SPAWN: Lazy<Option<(u32, Option<u32>, Option<u32>)>> = Lazy::new(|| {
 static SPAWN_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SPAWN_FIRST_SEEN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 pub static SPAWNED_NPC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// (creator, value of creator+0x1b8 before the request, requested at).
+/// STEP_LoadWait ends with `creator+0x1b8 = 0xa492e0(WorldChrMan, &creator+0x100)`:
+/// the created ChrIns (run 25: the Owl spawned but never reached the
+/// ApplyEffect-fed registry, so it was never pinned and killed the owner).
+static SPAWN_WAIT: Mutex<Option<(usize, usize, std::time::Instant)>> = Mutex::new(None);
 
 fn npc_rows_for(model: u32) -> Vec<u32> {
     let base = MODULE_BASE.load(Ordering::Relaxed);
@@ -1013,6 +1018,43 @@ fn npc_rows_for(model: u32) -> Vec<u32> {
 
 fn spawn_step() {
     let Some((model, npc, think)) = *SPAWN else { return };
+    // After the request: pin the created character the moment it exists.
+    let wait = *SPAWN_WAIT.lock();
+    if let Some((creator, before, at)) = wait {
+        unsafe {
+            let created = read_ptr(creator + 0x1b8).unwrap_or(0);
+            if created != 0 && created != before {
+                let handle = read_checked::<u32>(created + 0x08);
+                let char_id = read_checked::<u32>(created + 0x68);
+                if let (Some(handle), Some(char_id)) = (handle, char_id) {
+                    *SPAWN_WAIT.lock() = None;
+                    if char_id == SPAWNED_NPC.load(Ordering::Relaxed) {
+                        *TARGET.lock() = Some(Target { handle, ptr: created, char_id });
+                        *LAST_WRITTEN.lock() = None;
+                        PINNED_AT.store(CUR_FRAME.load(Ordering::Relaxed), Ordering::Relaxed);
+                        // Harmless at once, before its first AI update.
+                        logic_off(created);
+                        if let Some(team) = *TEAM {
+                            RawPtr(created + 0x74).write::<u8>(team);
+                        }
+                        tracing::info!(
+                            ptr = format!("{created:#x}"),
+                            handle,
+                            char_id,
+                            after_ms = at.elapsed().as_millis() as u64,
+                            "spawn: created character pinned"
+                        );
+                    } else {
+                        tracing::warn!(char_id, "spawn: creator+0x1b8 changed but char id differs; not pinned");
+                    }
+                }
+            } else if at.elapsed() > std::time::Duration::from_secs(30) {
+                *SPAWN_WAIT.lock() = None;
+                tracing::warn!("spawn: no created character after 30 s");
+            }
+        }
+        return;
+    }
     if SPAWN_DONE.load(Ordering::Relaxed) || hero_pos().is_none() {
         return;
     }
@@ -1072,7 +1114,9 @@ fn spawn_step() {
         RawPtr(creator + 0x1ac).write::<f32>(0.0);
         SPAWNED_NPC.store(npc, Ordering::Relaxed);
         let req: ChrCreatorRequestFn = core::mem::transmute(f);
+        let before = read_ptr(creator + 0x1b8).unwrap_or(0);
         req(creator, model);
+        *SPAWN_WAIT.lock() = Some((creator, before, std::time::Instant::now()));
         // Re-pick: the puppet should be the spawned character, not whatever
         // was pinned before.
         *TARGET.lock() = None;
