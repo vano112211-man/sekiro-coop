@@ -543,6 +543,14 @@ fn write_step(from_ticker: bool) {
                         // put (or where it stands now), instead of letting its
                         // last animation carry it away (run 12).
                         REMOTE_STALE_STEPS.fetch_add(1, Ordering::Relaxed);
+                        // Data stopped: treat it like a stop, so the puppet does
+                        // not stand in its run cycle (run 19).
+                        if TARGET_MOVING.swap(false, Ordering::Relaxed) && *RESET_ANIM {
+                            if reset_anim(t.ptr) {
+                                STOP_RESETS.fetch_add(1, Ordering::Relaxed);
+                                *LAST_RESET_AT.lock() = Some(std::time::Instant::now());
+                            }
+                        }
                         let hold = last.unwrap_or(cur);
                         if last.is_none() {
                             *last = Some(hold);
