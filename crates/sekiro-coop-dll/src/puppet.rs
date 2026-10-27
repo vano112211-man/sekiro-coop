@@ -84,9 +84,10 @@ static MODE_RAW: Lazy<bool> = Lazy::new(|| {
 /// Hybrid (default): native warp at most every `SEKIRO_COOP_PUPPET_WARP_MS`
 /// (default 500) or when the puppet is more than 2 m from where it should be;
 /// raw physics-position steps every 8 ms in between. Warping every frame made
-/// the puppet flicker (run 9).
+/// the puppet flicker (run 9). Default 50 ms since run 16: with the animation
+/// reset in place it is smooth and the game plays the puppet's own walk/run cycle.
 static WARP_MS: Lazy<u64> = Lazy::new(|| {
-    std::env::var("SEKIRO_COOP_PUPPET_WARP_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(500)
+    std::env::var("SEKIRO_COOP_PUPPET_WARP_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(50)
 });
 /// Where the puppet goes. `offset` (default): `SEKIRO_COOP_PUPPET_OFFSET` m
 /// ahead of the Hero. `net`: the remote player's position from the latest
