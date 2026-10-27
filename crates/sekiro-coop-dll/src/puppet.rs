@@ -130,6 +130,33 @@ static SCAN: Lazy<bool> = Lazy::new(|| {
 const RVA_CHR_WARP: usize = 0x9f81f0;
 const VT_SLOT_WARP: usize = 0x6A0;
 type ChrWarpFn = unsafe extern "system" fn(chr: usize, pos: *const [f32; 4], rot: *const [f32; 4], a: u8, b: u8);
+/// ChrCmd_ChrResetAnimation(false) → 0x9f4c60(chr): resets the animation
+/// module `[ChrIns+0x1ff8]+0x28` (stops the puppet's run cycle and its root
+/// motion, which moved it between our writes ~80% of the time in run 13).
+const RVA_CHR_RESET_ANIM: usize = 0x9f4c60;
+const RESET_ANIM_BYTES: [u8; 14] =
+    [0x48, 0x8b, 0x81, 0xf8, 0x1f, 0x00, 0x00, 0x48, 0x8b, 0x48, 0x28, 0x48, 0x85, 0xc9];
+type ChrResetAnimFn = unsafe extern "system" fn(chr: usize);
+static RESET_ANIM: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_RESET_ANIM").map(|v| v != "0").unwrap_or(true)
+});
+static LAST_RESET_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static ANIM_RESETS: AtomicU64 = AtomicU64::new(0);
+static ANIM_RESET_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// Fraction of the remaining distance covered per 8 ms step (net source).
+static SMOOTH: Lazy<f32> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_SMOOTH").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0.35)
+});
+/// Yaw (radians) the puppet should face: from the target's movement.
+static YAW: Mutex<Option<f32>> = Mutex::new(None);
+static LAST_TARGET: Mutex<Option<[f32; 3]>> = Mutex::new(None);
+static YAW_OFFSET: Lazy<f32> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_YAW_OFFSET_DEG")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(0.0)
+        .to_radians()
+});
 static WARPS: AtomicU64 = AtomicU64::new(0);
 static IN_STEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WARP_REFUSED: AtomicU64 = AtomicU64::new(0);
@@ -323,6 +350,51 @@ unsafe fn native_warp(chr: usize, pos: [f32; 3], rot: [f32; 4]) -> bool {
     true
 }
 
+/// Call the native animation reset once its first bytes match 1.06.
+unsafe fn reset_anim(chr: usize) -> bool {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    if base == 0 {
+        return false;
+    }
+    let f = base + RVA_CHR_RESET_ANIM;
+    let ok = readable(f, RESET_ANIM_BYTES.len())
+        && core::slice::from_raw_parts(f as *const u8, RESET_ANIM_BYTES.len()) == RESET_ANIM_BYTES;
+    if !ok {
+        ANIM_RESET_REFUSED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    // Same guard the game's own path relies on: the animation module exists.
+    let has_anim = read_ptr(chr + 0x1ff8).and_then(|sm| read_ptr(sm + 0x28)).is_some();
+    if !has_anim {
+        return false;
+    }
+    let reset: ChrResetAnimFn = core::mem::transmute(f);
+    reset(chr);
+    ANIM_RESETS.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Yaw-only quaternion, Havok order (x, y, z, w), rotation about +Y.
+fn yaw_quat(yaw: f32) -> [f32; 4] {
+    let h = 0.5 * yaw;
+    [0.0, h.sin(), 0.0, h.cos()]
+}
+
+/// Hero rotation quaternion (physics module +0x70), for calibration logs.
+fn hero_rot() -> Option<[f32; 4]> {
+    let m = crate::global()?;
+    let addrs = m.base_addrs.as_ref()?;
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let root = base + addrs.player_position;
+    unsafe {
+        let a = read_ptr(root)?;
+        let chr = read_ptr(a + 0x88)?;
+        let sm = read_ptr(chr + 0x1ff8)?;
+        let phys = read_ptr(sm + 0x68)?;
+        read_checked::<[f32; 4]>(phys + 0x70)
+    }
+}
+
 /// Puppet rotation: the physics module keeps a quaternion at +0x70.
 unsafe fn rot_of(chr: usize) -> Option<[f32; 4]> {
     let sm = read_ptr(chr + 0x1ff8)?;
@@ -400,6 +472,15 @@ fn write_step(from_ticker: bool) {
                 }
             }
         }
+        if *RESET_ANIM {
+            let due = LAST_RESET_AT
+                .lock()
+                .map(|t| t.elapsed() >= std::time::Duration::from_secs(2))
+                .unwrap_or(true);
+            if due && reset_anim(t.ptr) {
+                *LAST_RESET_AT.lock() = Some(std::time::Instant::now());
+            }
+        }
         let Some(p) = phys_pos_addr(t.ptr) else {
             STALE.fetch_add(1, Ordering::Relaxed);
             return;
@@ -450,8 +531,38 @@ fn write_step(from_ticker: bool) {
             } else {
                 cur[1]
             };
-            let desired = [tx, y, tz];
-            let off_by = dist([cur[0], 0.0, cur[2]], [desired[0], 0.0, desired[2]]);
+            // Yaw from the target's own movement (net) or the Hero's heading.
+            let yaw = {
+                let mut lt = LAST_TARGET.lock();
+                let mut yg = YAW.lock();
+                if let Some(prev) = *lt {
+                    let (dx, dz) = (tx - prev[0], tz - prev[2]);
+                    if dx * dx + dz * dz > 0.05 * 0.05 {
+                        *yg = Some(dx.atan2(dz) + *YAW_OFFSET);
+                        *lt = Some([tx, ty, tz]);
+                    }
+                } else {
+                    *lt = Some([tx, ty, tz]);
+                }
+                *yg
+            };
+            // Ease toward the network target instead of jumping to each packet.
+            let (sx, sz) = if *SOURCE_NET {
+                let from = last.unwrap_or(cur);
+                let k = SMOOTH.clamp(0.05, 1.0);
+                (from[0] + (tx - from[0]) * k, from[2] + (tz - from[2]) * k)
+            } else {
+                (tx, tz)
+            };
+            let desired = [sx, y, sz];
+            if let Some(yaw) = yaw {
+                if let Some(rp) = read_ptr(t.ptr + 0x1ff8).and_then(|sm| read_ptr(sm + 0x68)) {
+                    if readable(rp + 0x70, 16) {
+                        RawPtr(rp + 0x70).write::<[f32; 4]>(yaw_quat(yaw));
+                    }
+                }
+            }
+            let off_by = dist([cur[0], 0.0, cur[2]], [tx, 0.0, tz]);
             let warp_due = {
                 let last_warp = *LAST_WARP_AT.lock();
                 match last_warp {
@@ -461,7 +572,11 @@ fn write_step(from_ticker: bool) {
             };
             let warped = !*MODE_RAW
                 && (warp_due || off_by > 2.0)
-                && rot_of(t.ptr).map(|r| native_warp(t.ptr, desired, r)).unwrap_or(false);
+                && (*YAW.lock())
+                    .map(yaw_quat)
+                    .or_else(|| rot_of(t.ptr))
+                    .map(|r| native_warp(t.ptr, desired, r))
+                    .unwrap_or(false);
             if warped {
                 *LAST_WARP_AT.lock() = Some(std::time::Instant::now());
             } else {
@@ -692,6 +807,12 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         mode = if *MODE_RAW { "raw" } else { "warp" },
         warps = WARPS.load(Ordering::Relaxed),
         source = if *SOURCE_NET { "net" } else { "offset" },
+        anim_resets = ANIM_RESETS.load(Ordering::Relaxed),
+        anim_reset_refused = ANIM_RESET_REFUSED.load(Ordering::Relaxed),
+        yaw_deg = ?YAW.lock().map(|y| y.to_degrees()),
+        puppet_rot = ?t.and_then(|t| unsafe { rot_of(t.ptr) }),
+        hero_rot = ?hero_rot(),
+        hero_heading = ?HEADING.lock().0,
         remote_fresh = REMOTE_FRESH_STEPS.load(Ordering::Relaxed),
         remote_stale = REMOTE_STALE_STEPS.load(Ordering::Relaxed),
         remote_pos = ?remote_target(),
