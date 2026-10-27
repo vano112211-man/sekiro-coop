@@ -367,6 +367,13 @@ fn start_session_from_env(m: &'static Mod) -> anyhow::Result<()> {
 pub fn on_frame() {
     let Some(m) = global() else { return };
     let frame = m.advance_frame();
+    // Every frame, before anything reads the registry: drop characters the
+    // game has freed (death/reload/area unload). Cheap: a few VirtualQuery
+    // calls per registered character.
+    let pruned = puppet::prune_registry(m);
+    if pruned > 0 {
+        tracing::info!(pruned, "chrins registry: dropped stale entries");
+    }
     puppet::on_tick(m, frame);
 
     // Drain bridge events for this tick BEFORE flushing subscribers —
@@ -735,15 +742,20 @@ pub fn on_frame() {
                 // owns the world; clients mirror).
                 let is_host = matches!(m.authority.peer, PeerId::Host);
                 if is_host && frame % 12 == 0 {
-                    let entries: Vec<usize> = {
+                    let entries: Vec<(u32, usize)> = {
                         let reg = m.chrins_registry.lock();
-                        reg.values().copied().collect()
+                        reg.iter().map(|(h, p)| (*h, *p)).collect()
                     };
                     let mut entities: Vec<sekiro_coop_net::wire::EnemyState> =
                         Vec::with_capacity(entries.len());
                     let total_live = entries.len();
                     let mut hashes = m.last_sent_hash.lock();
-                    for ptr in entries {
+                    for (handle, ptr) in entries {
+                        // Re-check right before reading: the game may have
+                        // freed it since the prune at frame start.
+                        if !puppet::chrins_alive(ptr, handle) {
+                            continue;
+                        }
                         let snap = unsafe {
                             sekiro_sdk_sys::live::chrins_snapshot(
                                 sekiro_sdk_sys::memory::RawPtr(ptr),
@@ -913,6 +925,9 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
                 let mut diffs = Vec::<String>::new();
                 for ent in &entities {
                     match reg.get(&ent.handle) {
+                        Some(&local_ptr) if !puppet::chrins_alive(local_ptr, ent.handle) => {
+                            read_failed += 1;
+                        }
                         Some(&local_ptr) => {
                             matched += 1;
                             let chrins_raw =

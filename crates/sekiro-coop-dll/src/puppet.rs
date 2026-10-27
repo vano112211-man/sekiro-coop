@@ -222,6 +222,43 @@ unsafe fn read_ptr(addr: usize) -> Option<usize> {
     read_checked::<usize>(addr).filter(|p| *p >= 0x10000)
 }
 
+/// True if `chr` still looks like a live ChrIns registered under `handle`:
+/// the handle at +0x08 matches and every pointer hop that
+/// `live::chrins_snapshot` / `chrins_write_hp` follow is mapped. Used to
+/// prune the registry: after death/reload the game frees and re-creates
+/// characters, and the stale pointers crashed `chrins_snapshot`
+/// (run 11: AV at sekiro_coop.dll+0xac37c reading `[ChrIns+0x1ff8]+0x18`).
+pub fn chrins_alive(chr: usize, handle: u32) -> bool {
+    unsafe {
+        if read_checked::<u32>(chr + 0x08) != Some(handle) {
+            return false;
+        }
+        if !readable(chr, 0x80) {
+            return false;
+        }
+        let Some(sm) = read_ptr(chr + 0x1ff8) else { return false };
+        if !readable(sm, 0x70) {
+            return false;
+        }
+        for (hop, len) in [(0x10usize, 0x24usize), (0x18, 0x150), (0x68, 0x90)] {
+            match read_checked::<usize>(sm + hop) {
+                Some(0) => {}
+                Some(p) if p >= 0x10000 && readable(p, len) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+/// Drop registry entries that are no longer live ChrIns.
+pub fn prune_registry(m: &crate::Mod) -> usize {
+    let mut reg = m.chrins_registry.lock();
+    let before = reg.len();
+    reg.retain(|h, p| chrins_alive(*p, *h));
+    before - reg.len()
+}
+
 /// Address of the physics-module position: `ChrIns+0x1ff8 → +0x68 → +0x80`.
 unsafe fn phys_pos_addr(chrins: usize) -> Option<usize> {
     let sm = read_ptr(chrins + 0x1ff8)?;
