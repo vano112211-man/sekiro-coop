@@ -498,19 +498,12 @@ fn map_action(id: u32) -> Option<u32> {
         // Jump: none picked (too many jump attacks); the position path lifts it.
         50203000 => Some(3093),         // block (start; 50203010/12 follow)
         50002000 => Some(3093),         // parry (guess: run 23 order)
-        // Dodge: 3063 was a two-hit combo (run 29). Try candidates in turn,
-        // one per dodge, so the owner can say which dodge looked right.
-        213300 | 213301 => {
-            let i = DODGE_TRY.fetch_add(1, Ordering::Relaxed);
-            let id = DODGE_CANDIDATES[i % DODGE_CANDIDATES.len()];
-            tracing::info!(dodge_number = i + 1, id, "puppet dodge candidate");
-            Some(id)
-        }
+        // Dodge: 3063 was a two-hit combo (run 29); of the candidates the
+        // owner picked 3064, a backstep that throws firecrackers (run 30).
+        213300 | 213301 => Some(3064),
         _ => None,
     }
 }
-const DODGE_CANDIDATES: [u32; 7] = [3061, 3064, 3060, 3065, 3066, 3068, 3069];
-static DODGE_TRY: AtomicUsize = AtomicUsize::new(0);
 static REMOTE_ACTION_SEQ: Mutex<Option<u32>> = Mutex::new(None);
 static ACTION_LOGGED: AtomicU64 = AtomicU64::new(0);
 
