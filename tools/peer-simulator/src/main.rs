@@ -226,7 +226,7 @@ fn main() -> ExitCode {
                     &PacketBody::ManipState { frame, bytes },
                 );
             }
-            while dp_history.front().map(|(t, _)| *t <= cutoff).unwrap_or(false) {
+            while dp_history.front().map(|(t, _, _)| *t <= cutoff).unwrap_or(false) {
                 if let Some((_, ty, bytes)) = dp_history.pop_front() {
                     let _ = session.send_unreliable(
                         PacketType::State,
