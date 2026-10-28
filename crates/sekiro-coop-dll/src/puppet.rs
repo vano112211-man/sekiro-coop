@@ -812,6 +812,8 @@ fn write_step(from_ticker: bool) {
         // puppet's manipulator (ChrIns+0x58) on every step.
         if *INPUT_COPY {
             input_copy(t.ptr);
+        }
+        {
             if *NO_POS {
                 // Put it beside the Hero once, then leave movement to the input.
                 let mut lw = LAST_WRITTEN.lock();
