@@ -805,6 +805,17 @@ fn write_step(from_ticker: bool) {
         if ph == 'C' {
             return;
         }
+        // Input copy (run 35): the PlayerIns puppet ignores ForcePlayAnimation;
+        // player moves come from the manipulator. Copy the Hero's manipulator
+        // state (ChrManipulator base fields +0x10..+0x300, laid out by its ctor
+        // 0x7e3220: vectors, two 81-byte action arrays, 81 dwords) into the
+        // puppet's manipulator (ChrIns+0x58) on every step.
+        if *INPUT_COPY {
+            input_copy(t.ptr);
+            if *NO_POS {
+                return;
+            }
+        }
         let Some(p) = phys_pos_addr(t.ptr) else {
             STALE.fetch_add(1, Ordering::Relaxed);
             return;
@@ -1062,6 +1073,48 @@ fn npc_rows_for(model: u32) -> Vec<u32> {
         )
         .map(|t| t.rows().map(|(id, _)| id).filter(|id| (lo..=hi).contains(id)).collect())
         .unwrap_or_default()
+    }
+}
+
+static INPUT_COPY: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_INPUT_COPY").map(|v| v == "1").unwrap_or(false)
+});
+static NO_POS: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_NOPOS").map(|v| v == "1").unwrap_or(false)
+});
+static INPUT_COPIES: AtomicU64 = AtomicU64::new(0);
+static INPUT_LOGGED: AtomicU64 = AtomicU64::new(0);
+const MANIP_COPY_FROM: usize = 0x10;
+const MANIP_COPY_TO: usize = 0x300;
+
+unsafe fn input_copy(puppet: usize) {
+    let Some(hero) = hero_chr() else { return };
+    if hero == puppet {
+        return;
+    }
+    let (Some(src), Some(dst)) = (read_ptr(hero + 0x58), read_ptr(puppet + 0x58)) else { return };
+    if src == dst || !readable(src, MANIP_COPY_TO) || !readable(dst, MANIP_COPY_TO) {
+        return;
+    }
+    core::ptr::copy_nonoverlapping(
+        (src + MANIP_COPY_FROM) as *const u8,
+        (dst + MANIP_COPY_FROM) as *mut u8,
+        MANIP_COPY_TO - MANIP_COPY_FROM,
+    );
+    let n = INPUT_COPIES.fetch_add(1, Ordering::Relaxed);
+    if n % 500 == 0 && INPUT_LOGGED.fetch_add(1, Ordering::Relaxed) < 40 {
+        let base = MODULE_BASE.load(Ordering::Relaxed);
+        let v: [f32; 4] = RawPtr(src + 0x10).read();
+        let flags: [u8; 16] = RawPtr(src + 0xf4).read();
+        tracing::info!(
+            copies = n + 1,
+            src_vt = ?read_checked::<usize>(src).map(|x| format!("{:#x}", x.wrapping_sub(base))),
+            dst_vt = ?read_checked::<usize>(dst).map(|x| format!("{:#x}", x.wrapping_sub(base))),
+            v10 = ?v,
+            flags = ?flags,
+            puppet_anim = ?anim_of(puppet),
+            "puppet input copy"
+        );
     }
 }
 
