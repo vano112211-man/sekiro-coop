@@ -1365,6 +1365,7 @@ static BVAR_COPY: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_BVAR_COPY").map(|v| v == "1").unwrap_or(false)
 });
 static BVAR_COPIES: AtomicU64 = AtomicU64::new(0);
+static BVAR_SIZE_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static BVAR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 unsafe fn bvar_array(chr: usize) -> Option<(usize, usize)> {
@@ -1372,11 +1373,13 @@ unsafe fn bvar_array(chr: usize) -> Option<(usize, usize)> {
     let m = read_ptr(bag + 0x28)?;
     let x = read_ptr(m + 0x20)?;
     let data = read_ptr(x + 0x140)?;
-    let n = read_checked::<i32>(x + 0x148)?;
-    if n <= 0 || n > 4096 {
-        return None;
+    // Run 51: the +0x148 "size" check failed (no copy happened). Log it once and
+    // copy the 0x400 bytes the scan saw instead.
+    let n = read_checked::<i32>(x + 0x148);
+    if !BVAR_SIZE_LOGGED.swap(true, Ordering::Relaxed) {
+        tracing::info!(x = format!("{x:#x}"), data = format!("{data:#x}"), size_field = ?n, q148 = ?read_checked::<u64>(x + 0x148).map(|v| format!("{v:#x}")), "bvar copy: array header");
     }
-    Some((data, n as usize))
+    Some((data, 0x400 / 4))
 }
 
 unsafe fn bvar_copy_from_hero(clone_chr: usize) {
