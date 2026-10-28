@@ -1065,7 +1065,93 @@ fn npc_rows_for(model: u32) -> Vec<u32> {
     }
 }
 
+// ---------------------------------------------------------------- net player
+
+/// Wolf-looking puppet (offline, 1.06): `0xa49460(WorldChrMan, id, data)` →
+/// `0xa07960(WorldChrMan+0x40 slots, id, data)` takes the first free player
+/// slot from index 1 (0 = local) and builds a `PlayerIns` (0xa05a80 → ctor
+/// 0xa217a0), which copies `[data+8]` into `PlayerIns+0x2000` (its
+/// PlayerGameData, guess from DS3 layout). Called from the net code at
+/// 0xa7a840. `SEKIRO_COOP_SPAWN_PLAYER=1` creates one with the local
+/// player's PlayerGameData (`[Hero+0x2000]`), so it wears the same gear.
+const RVA_CREATE_NET_PLAYER: usize = 0xa49460;
+const CREATE_NET_PLAYER_BYTES: [u8; 11] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x83, 0xc1, 0x40, 0xe8];
+const RVA_GAME_DATA_MAN: usize = 0x3d5aac0;
+type CreateNetPlayerFn = unsafe extern "system" fn(wcm: usize, id: u32, data: *const u64) -> usize;
+static SPAWN_PLAYER: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_SPAWN_PLAYER").map(|v| v == "1").unwrap_or(false)
+});
+static NET_PLAYER_DATA: Mutex<[u64; 16]> = Mutex::new([0; 16]);
+
+fn spawn_player_step() {
+    if !*SPAWN_PLAYER || SPAWN_DONE.load(Ordering::Relaxed) || hero_pos().is_none() {
+        return;
+    }
+    {
+        let mut first = SPAWN_FIRST_SEEN.lock();
+        let t = *first.get_or_insert_with(std::time::Instant::now);
+        if t.elapsed() < std::time::Duration::from_secs(10) {
+            return;
+        }
+    }
+    SPAWN_DONE.store(true, Ordering::Relaxed);
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    unsafe {
+        let wcm = read_ptr(base + RVA_WORLD_CHR_MAN);
+        let hero = wcm.and_then(|w| read_ptr(w + 0x88));
+        let pgd_hero = hero.and_then(|h| read_ptr(h + 0x2000));
+        let pgd_gdm = read_ptr(base + RVA_GAME_DATA_MAN).and_then(|g| read_ptr(g + 0x08));
+        let slots = wcm.and_then(|w| read_checked::<i32>(w + 0x40));
+        let f = base + RVA_CREATE_NET_PLAYER;
+        let bytes_ok = readable(f, CREATE_NET_PLAYER_BYTES.len())
+            && core::slice::from_raw_parts(f as *const u8, CREATE_NET_PLAYER_BYTES.len())
+                == CREATE_NET_PLAYER_BYTES;
+        tracing::info!(
+            wcm = ?wcm.map(|v| format!("{v:#x}")),
+            hero = ?hero.map(|v| format!("{v:#x}")),
+            pgd_hero = ?pgd_hero.map(|v| format!("{v:#x}")),
+            pgd_gamedataman = ?pgd_gdm.map(|v| format!("{v:#x}")),
+            slot_count = ?slots,
+            bytes_ok,
+            "net player: state before create"
+        );
+        let (Some(wcm), Some(pgd)) = (wcm, pgd_hero) else {
+            tracing::warn!("net player: missing WorldChrMan or PlayerGameData, not creating");
+            return;
+        };
+        if !bytes_ok || Some(pgd) != pgd_gdm {
+            tracing::warn!("net player: checks failed (bytes or PlayerGameData mismatch), not creating");
+            return;
+        }
+        let ptr = {
+            let mut d = NET_PLAYER_DATA.lock();
+            d[0] = 1; // id
+            d[1] = pgd as u64;
+            d.as_ptr()
+        };
+        let create: CreateNetPlayerFn = core::mem::transmute(f);
+        let chr = create(wcm, 1, ptr);
+        let handle = if chr != 0 { read_checked::<u32>(chr + 0x08) } else { None };
+        let char_id = if chr != 0 { read_checked::<u32>(chr + 0x68) } else { None };
+        let vt = if chr != 0 { read_checked::<usize>(chr).map(|v| v.wrapping_sub(base)) } else { None };
+        tracing::info!(
+            chr = format!("{chr:#x}"),
+            vtable_rva = ?vt.map(|v| format!("{v:#x}")),
+            handle = ?handle,
+            char_id = ?char_id,
+            "net player: created"
+        );
+        if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
+            *TARGET.lock() = Some(Target { handle, ptr: chr, char_id });
+            *LAST_WRITTEN.lock() = None;
+            *PIN_TIME.lock() = Some(std::time::Instant::now());
+            SPAWNED_NPC.store(u32::MAX, Ordering::Relaxed); // never auto-pin enemies
+        }
+    }
+}
+
 fn spawn_step() {
+    spawn_player_step();
     let Some((model, npc, think)) = *SPAWN else { return };
     // After the request: pin the created character the moment it exists.
     let wait = *SPAWN_WAIT.lock();
