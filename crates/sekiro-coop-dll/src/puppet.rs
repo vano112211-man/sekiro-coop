@@ -813,6 +813,26 @@ fn write_step(from_ticker: bool) {
         if *INPUT_COPY {
             input_copy(t.ptr);
         }
+        // Run 56: the clone is updated rarely. Script command
+        // ChrCmd_ForceSetOmissionLevel (EventChrEntity vt+0x1e0 = 0x74fae0) sets
+        // bit 0 of ChrIns+0x1a10 (force) and ChrIns+0x110 (omission level, when
+        // ChrIns+0x1ff0 == -2). Force the clone to the Hero's level every step.
+        if *CLONE_NOOMIT {
+            if let Some(hero_c) = hero_chr() {
+                let hl = read_checked::<u32>(hero_c + 0x110);
+                let cl = read_checked::<u32>(t.ptr + 0x110);
+                let cf = read_checked::<u8>(t.ptr + 0x1a10);
+                if !NOOMIT_LOGGED.swap(true, Ordering::Relaxed) {
+                    tracing::info!(hero_level = ?hl, clone_level = ?cl, clone_flags = ?cf,
+                        hero_1ff0 = ?read_checked::<i32>(hero_c + 0x1ff0), clone_1ff0 = ?read_checked::<i32>(t.ptr + 0x1ff0),
+                        hero_flags = ?read_checked::<u8>(hero_c + 0x1a10), "omission: before");
+                }
+                if let (Some(hl), Some(cf)) = (hl, cf) {
+                    RawPtr(t.ptr + 0x110).write::<u32>(hl);
+                    RawPtr(t.ptr + 0x1a10).write::<u8>(cf | 1);
+                }
+            }
+        }
         if *CORRECT_ONLY {
             // Run 39: the clone is created at the world origin and, far from
             // the Hero, its manipulator was never updated. Put it beside the
@@ -1145,6 +1165,10 @@ static CORRECT_M: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_CORRECT_M").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5)
 });
 static CORRECTIONS: AtomicU64 = AtomicU64::new(0);
+static CLONE_NOOMIT: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_CLONE_NOOMIT").map(|v| v == "1").unwrap_or(false)
+});
+static NOOMIT_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static NUDGES: AtomicU64 = AtomicU64::new(0);
 static INPUT_LOGGED: AtomicU64 = AtomicU64::new(0);
 const MANIP_COPY_FROM: usize = 0x10;
