@@ -1324,9 +1324,38 @@ unsafe fn clone_apply_state(this: usize) {
         return;
     }
     for (a, b) in PAD_COPY_RANGES {
-        core::ptr::copy_nonoverlapping((src + a) as *const u8, (this + a) as *mut u8, b - a);
+        if !(base_only && a >= 0x340) {
+            core::ptr::copy_nonoverlapping((src + a) as *const u8, (this + a) as *mut u8, b - a);
+        }
+    }
+    // Run 43: with only these fields the clone attacks but never walks, even
+    // with no overwrite at all. Try also copying the PadManipulator
+    // sub-objects (+0x350: 0x4f30 bytes, +0x358: 0x26a8 bytes), skipping every
+    // qword that is a readable pointer in either object.
+    if *CLONE_SUBOBJ {
+        for (off, len) in [(0x350usize, 0x4f30usize), (0x358, 0x26a8)] {
+            let (Some(s_obj), Some(d_obj)) = (read_ptr(src + off), read_ptr(this + off)) else { continue };
+            if !readable(s_obj, len) || !readable(d_obj, len) {
+                continue;
+            }
+            let mut i = 0;
+            while i + 8 <= len {
+                let sv: u64 = RawPtr(s_obj + i).read();
+                let dv: u64 = RawPtr(d_obj + i).read();
+                let is_ptr = |v: u64| v > 0x10000 && v % 8 == 0 && v < 0x7fff_ffff_ffff && readable(v as usize, 8);
+                if !is_ptr(sv) && !is_ptr(dv) {
+                    RawPtr(d_obj + i).write::<u64>(sv);
+                }
+                i += 8;
+            }
+            SUBOBJ_COPIES.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
+static CLONE_SUBOBJ: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_CLONE_SUBOBJ").map(|v| v == "1").unwrap_or(false)
+});
+static SUBOBJ_COPIES: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "system" fn clone_upd48(this: usize, dt: f32, ctrl: usize, flag: usize) -> usize {
     CLONE_UPD_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -2035,6 +2064,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         remote_manip_rx = REMOTE_MANIP_RX.load(Ordering::Relaxed),
         remote_manip_used = REMOTE_MANIP_USED.load(Ordering::Relaxed),
         clone_upd_calls = CLONE_UPD_CALLS.load(Ordering::Relaxed),
+        subobj_copies = SUBOBJ_COPIES.load(Ordering::Relaxed),
         corrections = CORRECTIONS.load(Ordering::Relaxed),
         nudges = NUDGES.load(Ordering::Relaxed),
         clone_off_by = ?t.and_then(|t| unsafe { phys_pos_addr(t.ptr).map(|p| RawPtr(p).read::<[f32; 3]>()) }).zip(remote_target()).map(|(a, b)| dist([a[0], 0.0, a[2]], [b[0], 0.0, b[2]])),
