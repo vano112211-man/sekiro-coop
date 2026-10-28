@@ -1999,9 +1999,15 @@ static DP_HERO_SESSION: Mutex<usize> = Mutex::new(0);
 static DP_CLONE_SESSION: Mutex<usize> = Mutex::new(0);
 static DP_HERO_ATTACHED: AtomicUsize = AtomicUsize::new(0);
 static DP_CLONE_ATTACHED: AtomicUsize = AtomicUsize::new(0);
-static DP_OUTBOX: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
-static DP_INBOX: Mutex<std::collections::VecDeque<(std::time::Instant, Vec<u8>)>> =
+/// (type, bytes). Run 60: the Hero sends type 1 (~15/s) and type 7 (~2.5/s);
+/// dropping type 7 and answering every Receive with type-1 data lost the
+/// clone's animations, so everything is kept per type now.
+static DP_OUTBOX: Mutex<Vec<(u32, Vec<u8>)>> = Mutex::new(Vec::new());
+static DP_INBOX: Mutex<std::collections::VecDeque<(std::time::Instant, u32, Vec<u8>)>> =
     Mutex::new(std::collections::VecDeque::new());
+static DP_RECV_TYPES: Mutex<[u64; 16]> = Mutex::new([0; 16]);
+static DP_GIVEN_TYPES: Mutex<[u64; 16]> = Mutex::new([0; 16]);
+static DP_SIZES: Mutex<[usize; 16]> = Mutex::new([0; 16]);
 static DP_SENDS: AtomicU64 = AtomicU64::new(0);
 static DP_SEND_TYPES: Mutex<[u64; 8]> = Mutex::new([0; 8]);
 static DP_RECV_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -2020,11 +2026,12 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
         t[(ty as usize).min(7)] += 1;
     }
     let n = size as usize;
-    if ty != 1 || n == 0 || n > DP_MAX || buf.is_null() || !readable(buf as usize, n) {
+    if ty > 15 || n == 0 || n > DP_MAX || buf.is_null() || !readable(buf as usize, n) {
         return 0;
     }
+    DP_SIZES.lock()[ty as usize] = n;
     let bytes = core::slice::from_raw_parts(buf, n).to_vec();
-    {
+    if ty == 1 {
         let mut f = DP_FIRST_BYTES.lock();
         if f.is_none() {
             *f = Some(bytes.iter().take(64).map(|b| format!("{b:02x}")).collect());
@@ -2032,21 +2039,23 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
     }
     if *DP_LOOPBACK {
         let mut q = DP_INBOX.lock();
-        q.push_back((std::time::Instant::now() + *DP_DELAY, bytes.clone()));
-        while q.len() > 600 {
+        q.push_back((std::time::Instant::now() + *DP_DELAY, ty, bytes.clone()));
+        while q.len() > 1200 {
             q.pop_front();
         }
     }
     let mut o = DP_OUTBOX.lock();
-    if o.len() < 64 {
-        o.push(bytes);
+    if o.len() < 128 {
+        o.push((ty, bytes));
     }
     0
 }
 
-/// out = {u8* buf, u32 cap, u32 size}; desc = {u8* buf, u32 cap}.
-unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const u64, _ty: u32) -> *mut u64 {
+/// out = {u8* buf, u32 cap, u32 size}; desc = {u8* buf, u32 cap}. Hands out
+/// the oldest due packet of the requested type only.
+unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const u64, ty: u32) -> *mut u64 {
     DP_RECV_CALLS.fetch_add(1, Ordering::Relaxed);
+    DP_RECV_TYPES.lock()[(ty as usize).min(15)] += 1;
     *out = 0;
     *out.add(1) = 0;
     *out.add(2) = 0;
@@ -2058,10 +2067,8 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
     let now = std::time::Instant::now();
     let pkt = {
         let mut q = DP_INBOX.lock();
-        match q.front() {
-            Some((due, _)) if *due <= now => q.pop_front().map(|(_, b)| b),
-            _ => None,
-        }
+        let i = q.iter().position(|(due, t, _)| *t == ty && *due <= now);
+        i.and_then(|i| q.remove(i)).map(|(_, _, b)| b)
     };
     if let Some(p) = pkt {
         if !dbuf.is_null() && p.len() <= cap {
@@ -2070,6 +2077,7 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
             *out.add(1) = cap as u64;
             *out.add(2) = p.len() as u64;
             DP_RECV_GIVEN.fetch_add(1, Ordering::Relaxed);
+            DP_GIVEN_TYPES.lock()[(ty as usize).min(15)] += 1;
         }
     }
     out
@@ -2147,6 +2155,9 @@ fn dp_session_step() {
             send_types = ?*DP_SEND_TYPES.lock(),
             recv_calls = DP_RECV_CALLS.load(Ordering::Relaxed),
             recv_given = DP_RECV_GIVEN.load(Ordering::Relaxed),
+            recv_types = ?*DP_RECV_TYPES.lock(),
+            given_types = ?*DP_GIVEN_TYPES.lock(),
+            last_sizes = ?*DP_SIZES.lock(),
             inbox = DP_INBOX.lock().len(),
             first_bytes = ?*DP_FIRST_BYTES.lock(),
             clone = format!("{:#x}", DP_CLONE_ATTACHED.load(Ordering::Relaxed)),
@@ -2172,8 +2183,8 @@ unsafe fn dp_attach_clone(chr: usize) {
     }
 }
 
-/// Packets the Hero sent since the last call, for the network.
-pub fn dp_take_outbox() -> Vec<Vec<u8>> {
+/// Packets the Hero sent since the last call, as (type, bytes), for the network.
+pub fn dp_take_outbox() -> Vec<(u32, Vec<u8>)> {
     if !*DP_SESSION {
         return Vec::new();
     }
@@ -2181,13 +2192,13 @@ pub fn dp_take_outbox() -> Vec<Vec<u8>> {
 }
 
 /// A packet from the remote player: queue it for the clone.
-pub fn dp_note_remote(bytes: Vec<u8>) {
-    if bytes.len() > DP_MAX {
+pub fn dp_note_remote(ty: u32, bytes: Vec<u8>) {
+    if bytes.len() > DP_MAX || ty > 15 {
         return;
     }
     let mut q = DP_INBOX.lock();
-    q.push_back((std::time::Instant::now(), bytes));
-    while q.len() > 600 {
+    q.push_back((std::time::Instant::now(), ty, bytes));
+    while q.len() > 1200 {
         q.pop_front();
     }
 }
