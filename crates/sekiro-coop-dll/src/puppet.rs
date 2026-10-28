@@ -1763,6 +1763,57 @@ fn bvar_scan_step() {
     }
 }
 
+// ---------------------------------------------------------------- is-local hook
+
+/// Run 55: 0x9f3430 is `IsLocalPlayer(chr)` = `[WorldChrMan]+0x88 == chr`, called
+/// from ~260 places; the local-only modules (HitWall, Docking, WireAction) are
+/// created behind it (0xa34c90). Guess: locomotion is also gated by it. With
+/// `SEKIRO_COOP_CLONE_LOCAL=1`, hook it to answer true for the clone too.
+const RVA_IS_LOCAL_PLAYER: usize = 0x9f3430;
+static CLONE_CHR: AtomicUsize = AtomicUsize::new(0);
+static ISLOCAL_ORIG: AtomicUsize = AtomicUsize::new(0);
+static ISLOCAL_CLONE_HITS: AtomicU64 = AtomicU64::new(0);
+
+extern "system" fn is_local_detour(chr: usize) -> u8 {
+    let c = CLONE_CHR.load(Ordering::Relaxed);
+    if c != 0 && chr == c {
+        ISLOCAL_CLONE_HITS.fetch_add(1, Ordering::Relaxed);
+        return 1;
+    }
+    let orig = ISLOCAL_ORIG.load(Ordering::Acquire);
+    if orig == 0 {
+        return 0;
+    }
+    let f: extern "system" fn(usize) -> u8 = unsafe { core::mem::transmute(orig) };
+    f(chr)
+}
+
+fn install_is_local_hook(clone: usize) {
+    if std::env::var("SEKIRO_COOP_CLONE_LOCAL").map(|v| v != "1").unwrap_or(true) {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let target = base + RVA_IS_LOCAL_PLAYER;
+    let expect: [u8; 11] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x05, 0xa3, 0x6d];
+    let ok = readable(target, expect.len())
+        && unsafe { core::slice::from_raw_parts(target as *const u8, expect.len()) } == expect;
+    if !ok {
+        tracing::warn!("is-local hook: bytes differ, not hooking");
+        return;
+    }
+    CLONE_CHR.store(clone, Ordering::Relaxed);
+    if ISLOCAL_ORIG.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    match sekiro_sdk_core::hook::create_hook(target, is_local_detour as usize) {
+        Ok((_h, tramp)) => {
+            ISLOCAL_ORIG.store(tramp as usize, Ordering::Release);
+            tracing::info!(clone = format!("{clone:#x}"), "is-local hook installed: clone counts as local player");
+        }
+        Err(e) => tracing::warn!(err = %e, "is-local hook failed"),
+    }
+}
+
 // ---------------------------------------------------------------- net player
 
 /// Wolf-looking puppet (offline, 1.06): `0xa49460(WorldChrMan, id, data)` →
@@ -1905,6 +1956,7 @@ fn spawn_player_step() {
         }
         if chr != 0 {
             clone_pad_install(chr);
+            install_is_local_hook(chr);
         }
         if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
             *TARGET.lock() = Some(Target { handle, ptr: chr, char_id });
@@ -2417,6 +2469,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         clone_upd_calls = CLONE_UPD_CALLS.load(Ordering::Relaxed),
         subobj_copies = SUBOBJ_COPIES.load(Ordering::Relaxed),
         bvar_copies = BVAR_COPIES.load(Ordering::Relaxed),
+        islocal_clone_hits = ISLOCAL_CLONE_HITS.load(Ordering::Relaxed),
         corrections = CORRECTIONS.load(Ordering::Relaxed),
         nudges = NUDGES.load(Ordering::Relaxed),
         clone_off_by = ?t.and_then(|t| unsafe { phys_pos_addr(t.ptr).map(|p| RawPtr(p).read::<[f32; 3]>()) }).zip(remote_target()).map(|(a, b)| dist([a[0], 0.0, a[2]], [b[0], 0.0, b[2]])),
