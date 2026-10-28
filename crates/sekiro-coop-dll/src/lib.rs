@@ -9,6 +9,7 @@
 pub mod hooks;
 pub mod overlay;
 pub mod puppet;
+pub mod vtcount;
 pub mod tick;
 
 use once_cell::sync::OnceCell;

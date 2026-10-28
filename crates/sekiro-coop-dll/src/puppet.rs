@@ -1838,6 +1838,99 @@ fn install_is_local_hook(clone: usize) {
     }
 }
 
+// ---------------------------------------------------------------- vt call counter
+
+extern "system" {
+    fn MH_CreateHook(target: *mut core::ffi::c_void, detour: *mut core::ffi::c_void, orig: *mut *mut core::ffi::c_void) -> i32;
+    fn MH_QueueEnableHook(target: *mut core::ffi::c_void) -> i32;
+    fn MH_ApplyQueued() -> i32;
+}
+const RVA_PLAYERINS_VT: usize = 0x2a2b338;
+const PLAYERINS_SLOTS: usize = 253;
+static VTC_SLOT_OF: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new()); // (slot, target rva)
+static VTC_LAST: Mutex<Option<(Vec<u64>, Vec<u64>)>> = Mutex::new(None);
+static VTC_REPORTS: AtomicU64 = AtomicU64::new(0);
+
+/// Run 57: hook every distinct PlayerIns virtual method with a counting stub
+/// (vtcount.rs) and report, per second, which ones run for the Hero but not
+/// for the clone. `SEKIRO_COOP_VTCOUNT=1`. Installed once, on the game thread.
+unsafe fn vtcount_install(hero: usize, clone: usize) {
+    if std::env::var("SEKIRO_COOP_VTCOUNT").map(|v| v != "1").unwrap_or(true) {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    crate::vtcount::VTC_HERO = hero;
+    crate::vtcount::VTC_CLONE = clone;
+    let stubs = crate::vtcount::stubs();
+    let vt = base + RVA_PLAYERINS_VT;
+    let mut seen = std::collections::HashSet::new();
+    let mut created = Vec::new();
+    let (mut skipped, mut failed) = (0, 0);
+    for slot in 2..PLAYERINS_SLOTS.min(crate::vtcount::N) {
+        let Some(f) = read_checked::<usize>(vt + slot * 8) else { continue };
+        if !seen.insert(f) || !readable(f, 16) {
+            skipped += 1;
+            continue;
+        }
+        // Too short to patch: a ret within the first 5 bytes.
+        let head = core::slice::from_raw_parts(f as *const u8, 6);
+        if head[..5].iter().any(|b| *b == 0xc3 || *b == 0xc2) {
+            skipped += 1;
+            continue;
+        }
+        let mut orig: *mut core::ffi::c_void = core::ptr::null_mut();
+        let st = MH_CreateHook(f as *mut _, stubs[slot] as usize as *mut _, &mut orig);
+        if st != 0 || orig.is_null() {
+            failed += 1;
+            continue;
+        }
+        crate::vtcount::VTC_ORIG[slot] = orig as usize;
+        created.push((slot, f));
+    }
+    for (_, f) in &created {
+        MH_QueueEnableHook(*f as *mut _);
+    }
+    let st = MH_ApplyQueued();
+    tracing::info!(hooked = created.len(), skipped, failed, apply = st, "vtcount: PlayerIns methods hooked");
+    *VTC_SLOT_OF.lock() = created.iter().map(|(s, f)| (*s, f - base)).collect();
+}
+
+fn vtcount_report() {
+    let slots = VTC_SLOT_OF.lock().clone();
+    if slots.is_empty() {
+        return;
+    }
+    let (h, c): (Vec<u64>, Vec<u64>) = unsafe {
+        (
+            (0..crate::vtcount::N).map(|i| core::ptr::read_volatile(&crate::vtcount::VTC_H[i])).collect(),
+            (0..crate::vtcount::N).map(|i| core::ptr::read_volatile(&crate::vtcount::VTC_C[i])).collect(),
+        )
+    };
+    let mut last = VTC_LAST.lock();
+    if let Some((lh, lc)) = last.as_ref() {
+        let n = VTC_REPORTS.fetch_add(1, Ordering::Relaxed);
+        if n < 12 {
+            let mut hero_only = Vec::new();
+            let mut clone_only = Vec::new();
+            let mut both = Vec::new();
+            for (slot, rva) in &slots {
+                let dh = h[*slot] - lh[*slot];
+                let dc = c[*slot] - lc[*slot];
+                if dh > 0 && dc == 0 {
+                    hero_only.push(format!("{:#x}@{rva:#x}:{dh}", slot * 8));
+                } else if dc > 0 && dh == 0 {
+                    clone_only.push(format!("{:#x}@{rva:#x}:{dc}", slot * 8));
+                } else if dh > 0 {
+                    both.push(format!("{:#x}:{dh}/{dc}", slot * 8));
+                }
+            }
+            tracing::info!(hero_only = ?hero_only, "vtcount hero-only (slot@fn:calls/s)");
+            tracing::info!(clone_only = ?clone_only, both = ?both, "vtcount clone-only and both (hero/clone)");
+        }
+    }
+    *last = Some((h, c));
+}
+
 // ---------------------------------------------------------------- net player
 
 /// Wolf-looking puppet (offline, 1.06): `0xa49460(WorldChrMan, id, data)` →
@@ -1981,6 +2074,9 @@ fn spawn_player_step() {
         if chr != 0 {
             clone_pad_install(chr);
             install_is_local_hook(chr);
+            if let Some(h) = hero {
+                vtcount_install(h, chr);
+            }
         }
         if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
             *TARGET.lock() = Some(Target { handle, ptr: chr, char_id });
@@ -2388,6 +2484,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     if frame % 60 != 0 {
         return;
     }
+    vtcount_report();
     let Some(hero) = hero_pos() else { return };
 
     let mut freeze_now = None;
