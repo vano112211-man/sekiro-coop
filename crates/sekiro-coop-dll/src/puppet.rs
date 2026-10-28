@@ -1936,7 +1936,8 @@ fn vtcount_report() {
                     both.push(format!("{:#x}:{dh}/{dc}", slot * 8));
                 }
             }
-            tracing::info!(hero_only = ?hero_only, "vtcount hero-only (slot@fn:calls/s)");
+            let all: u64 = unsafe { (0..crate::vtcount::N).map(|i| core::ptr::read_volatile(&crate::vtcount::VTC_ALL[i])).sum() };
+            tracing::info!(all_calls_total = all, hero_only = ?hero_only, "vtcount hero-only (slot@fn:calls/s)");
             tracing::info!(clone_only = ?clone_only, both = ?both, "vtcount clone-only and both (hero/clone)");
         }
     }

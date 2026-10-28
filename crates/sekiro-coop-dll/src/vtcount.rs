@@ -20,12 +20,15 @@ pub static mut VTC_ORIG: [usize; N] = [0; N];
 pub static mut VTC_H: [u64; N] = [0; N];
 #[no_mangle]
 pub static mut VTC_C: [u64; N] = [0; N];
+#[no_mangle]
+pub static mut VTC_ALL: [u64; N] = [0; N];
 
 core::arch::global_asm!(r#"
     .text
     .globl vtc_stub_0
 vtc_stub_0:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 0]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -41,6 +44,7 @@ vtc_stub_0:
     .globl vtc_stub_1
 vtc_stub_1:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 8]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -56,6 +60,7 @@ vtc_stub_1:
     .globl vtc_stub_2
 vtc_stub_2:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 16]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -71,6 +76,7 @@ vtc_stub_2:
     .globl vtc_stub_3
 vtc_stub_3:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 24]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -86,6 +92,7 @@ vtc_stub_3:
     .globl vtc_stub_4
 vtc_stub_4:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 32]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -101,6 +108,7 @@ vtc_stub_4:
     .globl vtc_stub_5
 vtc_stub_5:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 40]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -116,6 +124,7 @@ vtc_stub_5:
     .globl vtc_stub_6
 vtc_stub_6:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 48]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -131,6 +140,7 @@ vtc_stub_6:
     .globl vtc_stub_7
 vtc_stub_7:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 56]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -146,6 +156,7 @@ vtc_stub_7:
     .globl vtc_stub_8
 vtc_stub_8:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 64]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -161,6 +172,7 @@ vtc_stub_8:
     .globl vtc_stub_9
 vtc_stub_9:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 72]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -176,6 +188,7 @@ vtc_stub_9:
     .globl vtc_stub_10
 vtc_stub_10:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 80]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -191,6 +204,7 @@ vtc_stub_10:
     .globl vtc_stub_11
 vtc_stub_11:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 88]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -206,6 +220,7 @@ vtc_stub_11:
     .globl vtc_stub_12
 vtc_stub_12:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 96]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -221,6 +236,7 @@ vtc_stub_12:
     .globl vtc_stub_13
 vtc_stub_13:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 104]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -236,6 +252,7 @@ vtc_stub_13:
     .globl vtc_stub_14
 vtc_stub_14:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 112]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -251,6 +268,7 @@ vtc_stub_14:
     .globl vtc_stub_15
 vtc_stub_15:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 120]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -266,6 +284,7 @@ vtc_stub_15:
     .globl vtc_stub_16
 vtc_stub_16:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 128]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -281,6 +300,7 @@ vtc_stub_16:
     .globl vtc_stub_17
 vtc_stub_17:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 136]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -296,6 +316,7 @@ vtc_stub_17:
     .globl vtc_stub_18
 vtc_stub_18:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 144]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -311,6 +332,7 @@ vtc_stub_18:
     .globl vtc_stub_19
 vtc_stub_19:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 152]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -326,6 +348,7 @@ vtc_stub_19:
     .globl vtc_stub_20
 vtc_stub_20:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 160]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -341,6 +364,7 @@ vtc_stub_20:
     .globl vtc_stub_21
 vtc_stub_21:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 168]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -356,6 +380,7 @@ vtc_stub_21:
     .globl vtc_stub_22
 vtc_stub_22:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 176]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -371,6 +396,7 @@ vtc_stub_22:
     .globl vtc_stub_23
 vtc_stub_23:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 184]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -386,6 +412,7 @@ vtc_stub_23:
     .globl vtc_stub_24
 vtc_stub_24:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 192]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -401,6 +428,7 @@ vtc_stub_24:
     .globl vtc_stub_25
 vtc_stub_25:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 200]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -416,6 +444,7 @@ vtc_stub_25:
     .globl vtc_stub_26
 vtc_stub_26:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 208]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -431,6 +460,7 @@ vtc_stub_26:
     .globl vtc_stub_27
 vtc_stub_27:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 216]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -446,6 +476,7 @@ vtc_stub_27:
     .globl vtc_stub_28
 vtc_stub_28:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 224]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -461,6 +492,7 @@ vtc_stub_28:
     .globl vtc_stub_29
 vtc_stub_29:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 232]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -476,6 +508,7 @@ vtc_stub_29:
     .globl vtc_stub_30
 vtc_stub_30:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 240]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -491,6 +524,7 @@ vtc_stub_30:
     .globl vtc_stub_31
 vtc_stub_31:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 248]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -506,6 +540,7 @@ vtc_stub_31:
     .globl vtc_stub_32
 vtc_stub_32:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 256]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -521,6 +556,7 @@ vtc_stub_32:
     .globl vtc_stub_33
 vtc_stub_33:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 264]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -536,6 +572,7 @@ vtc_stub_33:
     .globl vtc_stub_34
 vtc_stub_34:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 272]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -551,6 +588,7 @@ vtc_stub_34:
     .globl vtc_stub_35
 vtc_stub_35:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 280]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -566,6 +604,7 @@ vtc_stub_35:
     .globl vtc_stub_36
 vtc_stub_36:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 288]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -581,6 +620,7 @@ vtc_stub_36:
     .globl vtc_stub_37
 vtc_stub_37:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 296]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -596,6 +636,7 @@ vtc_stub_37:
     .globl vtc_stub_38
 vtc_stub_38:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 304]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -611,6 +652,7 @@ vtc_stub_38:
     .globl vtc_stub_39
 vtc_stub_39:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 312]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -626,6 +668,7 @@ vtc_stub_39:
     .globl vtc_stub_40
 vtc_stub_40:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 320]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -641,6 +684,7 @@ vtc_stub_40:
     .globl vtc_stub_41
 vtc_stub_41:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 328]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -656,6 +700,7 @@ vtc_stub_41:
     .globl vtc_stub_42
 vtc_stub_42:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 336]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -671,6 +716,7 @@ vtc_stub_42:
     .globl vtc_stub_43
 vtc_stub_43:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 344]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -686,6 +732,7 @@ vtc_stub_43:
     .globl vtc_stub_44
 vtc_stub_44:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 352]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -701,6 +748,7 @@ vtc_stub_44:
     .globl vtc_stub_45
 vtc_stub_45:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 360]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -716,6 +764,7 @@ vtc_stub_45:
     .globl vtc_stub_46
 vtc_stub_46:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 368]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -731,6 +780,7 @@ vtc_stub_46:
     .globl vtc_stub_47
 vtc_stub_47:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 376]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -746,6 +796,7 @@ vtc_stub_47:
     .globl vtc_stub_48
 vtc_stub_48:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 384]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -761,6 +812,7 @@ vtc_stub_48:
     .globl vtc_stub_49
 vtc_stub_49:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 392]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -776,6 +828,7 @@ vtc_stub_49:
     .globl vtc_stub_50
 vtc_stub_50:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 400]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -791,6 +844,7 @@ vtc_stub_50:
     .globl vtc_stub_51
 vtc_stub_51:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 408]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -806,6 +860,7 @@ vtc_stub_51:
     .globl vtc_stub_52
 vtc_stub_52:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 416]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -821,6 +876,7 @@ vtc_stub_52:
     .globl vtc_stub_53
 vtc_stub_53:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 424]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -836,6 +892,7 @@ vtc_stub_53:
     .globl vtc_stub_54
 vtc_stub_54:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 432]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -851,6 +908,7 @@ vtc_stub_54:
     .globl vtc_stub_55
 vtc_stub_55:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 440]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -866,6 +924,7 @@ vtc_stub_55:
     .globl vtc_stub_56
 vtc_stub_56:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 448]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -881,6 +940,7 @@ vtc_stub_56:
     .globl vtc_stub_57
 vtc_stub_57:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 456]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -896,6 +956,7 @@ vtc_stub_57:
     .globl vtc_stub_58
 vtc_stub_58:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 464]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -911,6 +972,7 @@ vtc_stub_58:
     .globl vtc_stub_59
 vtc_stub_59:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 472]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -926,6 +988,7 @@ vtc_stub_59:
     .globl vtc_stub_60
 vtc_stub_60:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 480]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -941,6 +1004,7 @@ vtc_stub_60:
     .globl vtc_stub_61
 vtc_stub_61:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 488]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -956,6 +1020,7 @@ vtc_stub_61:
     .globl vtc_stub_62
 vtc_stub_62:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 496]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -971,6 +1036,7 @@ vtc_stub_62:
     .globl vtc_stub_63
 vtc_stub_63:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 504]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -986,6 +1052,7 @@ vtc_stub_63:
     .globl vtc_stub_64
 vtc_stub_64:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 512]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1001,6 +1068,7 @@ vtc_stub_64:
     .globl vtc_stub_65
 vtc_stub_65:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 520]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1016,6 +1084,7 @@ vtc_stub_65:
     .globl vtc_stub_66
 vtc_stub_66:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 528]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1031,6 +1100,7 @@ vtc_stub_66:
     .globl vtc_stub_67
 vtc_stub_67:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 536]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1046,6 +1116,7 @@ vtc_stub_67:
     .globl vtc_stub_68
 vtc_stub_68:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 544]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1061,6 +1132,7 @@ vtc_stub_68:
     .globl vtc_stub_69
 vtc_stub_69:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 552]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1076,6 +1148,7 @@ vtc_stub_69:
     .globl vtc_stub_70
 vtc_stub_70:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 560]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1091,6 +1164,7 @@ vtc_stub_70:
     .globl vtc_stub_71
 vtc_stub_71:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 568]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1106,6 +1180,7 @@ vtc_stub_71:
     .globl vtc_stub_72
 vtc_stub_72:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 576]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1121,6 +1196,7 @@ vtc_stub_72:
     .globl vtc_stub_73
 vtc_stub_73:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 584]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1136,6 +1212,7 @@ vtc_stub_73:
     .globl vtc_stub_74
 vtc_stub_74:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 592]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1151,6 +1228,7 @@ vtc_stub_74:
     .globl vtc_stub_75
 vtc_stub_75:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 600]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1166,6 +1244,7 @@ vtc_stub_75:
     .globl vtc_stub_76
 vtc_stub_76:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 608]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1181,6 +1260,7 @@ vtc_stub_76:
     .globl vtc_stub_77
 vtc_stub_77:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 616]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1196,6 +1276,7 @@ vtc_stub_77:
     .globl vtc_stub_78
 vtc_stub_78:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 624]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1211,6 +1292,7 @@ vtc_stub_78:
     .globl vtc_stub_79
 vtc_stub_79:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 632]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1226,6 +1308,7 @@ vtc_stub_79:
     .globl vtc_stub_80
 vtc_stub_80:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 640]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1241,6 +1324,7 @@ vtc_stub_80:
     .globl vtc_stub_81
 vtc_stub_81:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 648]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1256,6 +1340,7 @@ vtc_stub_81:
     .globl vtc_stub_82
 vtc_stub_82:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 656]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1271,6 +1356,7 @@ vtc_stub_82:
     .globl vtc_stub_83
 vtc_stub_83:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 664]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1286,6 +1372,7 @@ vtc_stub_83:
     .globl vtc_stub_84
 vtc_stub_84:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 672]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1301,6 +1388,7 @@ vtc_stub_84:
     .globl vtc_stub_85
 vtc_stub_85:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 680]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1316,6 +1404,7 @@ vtc_stub_85:
     .globl vtc_stub_86
 vtc_stub_86:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 688]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1331,6 +1420,7 @@ vtc_stub_86:
     .globl vtc_stub_87
 vtc_stub_87:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 696]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1346,6 +1436,7 @@ vtc_stub_87:
     .globl vtc_stub_88
 vtc_stub_88:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 704]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1361,6 +1452,7 @@ vtc_stub_88:
     .globl vtc_stub_89
 vtc_stub_89:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 712]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1376,6 +1468,7 @@ vtc_stub_89:
     .globl vtc_stub_90
 vtc_stub_90:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 720]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1391,6 +1484,7 @@ vtc_stub_90:
     .globl vtc_stub_91
 vtc_stub_91:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 728]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1406,6 +1500,7 @@ vtc_stub_91:
     .globl vtc_stub_92
 vtc_stub_92:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 736]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1421,6 +1516,7 @@ vtc_stub_92:
     .globl vtc_stub_93
 vtc_stub_93:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 744]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1436,6 +1532,7 @@ vtc_stub_93:
     .globl vtc_stub_94
 vtc_stub_94:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 752]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1451,6 +1548,7 @@ vtc_stub_94:
     .globl vtc_stub_95
 vtc_stub_95:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 760]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1466,6 +1564,7 @@ vtc_stub_95:
     .globl vtc_stub_96
 vtc_stub_96:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 768]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1481,6 +1580,7 @@ vtc_stub_96:
     .globl vtc_stub_97
 vtc_stub_97:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 776]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1496,6 +1596,7 @@ vtc_stub_97:
     .globl vtc_stub_98
 vtc_stub_98:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 784]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1511,6 +1612,7 @@ vtc_stub_98:
     .globl vtc_stub_99
 vtc_stub_99:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 792]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1526,6 +1628,7 @@ vtc_stub_99:
     .globl vtc_stub_100
 vtc_stub_100:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 800]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1541,6 +1644,7 @@ vtc_stub_100:
     .globl vtc_stub_101
 vtc_stub_101:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 808]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1556,6 +1660,7 @@ vtc_stub_101:
     .globl vtc_stub_102
 vtc_stub_102:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 816]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1571,6 +1676,7 @@ vtc_stub_102:
     .globl vtc_stub_103
 vtc_stub_103:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 824]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1586,6 +1692,7 @@ vtc_stub_103:
     .globl vtc_stub_104
 vtc_stub_104:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 832]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1601,6 +1708,7 @@ vtc_stub_104:
     .globl vtc_stub_105
 vtc_stub_105:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 840]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1616,6 +1724,7 @@ vtc_stub_105:
     .globl vtc_stub_106
 vtc_stub_106:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 848]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1631,6 +1740,7 @@ vtc_stub_106:
     .globl vtc_stub_107
 vtc_stub_107:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 856]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1646,6 +1756,7 @@ vtc_stub_107:
     .globl vtc_stub_108
 vtc_stub_108:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 864]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1661,6 +1772,7 @@ vtc_stub_108:
     .globl vtc_stub_109
 vtc_stub_109:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 872]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1676,6 +1788,7 @@ vtc_stub_109:
     .globl vtc_stub_110
 vtc_stub_110:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 880]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1691,6 +1804,7 @@ vtc_stub_110:
     .globl vtc_stub_111
 vtc_stub_111:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 888]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1706,6 +1820,7 @@ vtc_stub_111:
     .globl vtc_stub_112
 vtc_stub_112:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 896]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1721,6 +1836,7 @@ vtc_stub_112:
     .globl vtc_stub_113
 vtc_stub_113:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 904]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1736,6 +1852,7 @@ vtc_stub_113:
     .globl vtc_stub_114
 vtc_stub_114:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 912]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1751,6 +1868,7 @@ vtc_stub_114:
     .globl vtc_stub_115
 vtc_stub_115:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 920]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1766,6 +1884,7 @@ vtc_stub_115:
     .globl vtc_stub_116
 vtc_stub_116:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 928]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1781,6 +1900,7 @@ vtc_stub_116:
     .globl vtc_stub_117
 vtc_stub_117:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 936]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1796,6 +1916,7 @@ vtc_stub_117:
     .globl vtc_stub_118
 vtc_stub_118:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 944]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1811,6 +1932,7 @@ vtc_stub_118:
     .globl vtc_stub_119
 vtc_stub_119:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 952]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1826,6 +1948,7 @@ vtc_stub_119:
     .globl vtc_stub_120
 vtc_stub_120:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 960]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1841,6 +1964,7 @@ vtc_stub_120:
     .globl vtc_stub_121
 vtc_stub_121:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 968]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1856,6 +1980,7 @@ vtc_stub_121:
     .globl vtc_stub_122
 vtc_stub_122:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 976]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1871,6 +1996,7 @@ vtc_stub_122:
     .globl vtc_stub_123
 vtc_stub_123:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 984]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1886,6 +2012,7 @@ vtc_stub_123:
     .globl vtc_stub_124
 vtc_stub_124:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 992]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1901,6 +2028,7 @@ vtc_stub_124:
     .globl vtc_stub_125
 vtc_stub_125:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1000]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1916,6 +2044,7 @@ vtc_stub_125:
     .globl vtc_stub_126
 vtc_stub_126:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1008]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1931,6 +2060,7 @@ vtc_stub_126:
     .globl vtc_stub_127
 vtc_stub_127:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1016]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1946,6 +2076,7 @@ vtc_stub_127:
     .globl vtc_stub_128
 vtc_stub_128:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1024]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1961,6 +2092,7 @@ vtc_stub_128:
     .globl vtc_stub_129
 vtc_stub_129:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1032]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1976,6 +2108,7 @@ vtc_stub_129:
     .globl vtc_stub_130
 vtc_stub_130:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1040]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -1991,6 +2124,7 @@ vtc_stub_130:
     .globl vtc_stub_131
 vtc_stub_131:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1048]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2006,6 +2140,7 @@ vtc_stub_131:
     .globl vtc_stub_132
 vtc_stub_132:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1056]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2021,6 +2156,7 @@ vtc_stub_132:
     .globl vtc_stub_133
 vtc_stub_133:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1064]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2036,6 +2172,7 @@ vtc_stub_133:
     .globl vtc_stub_134
 vtc_stub_134:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1072]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2051,6 +2188,7 @@ vtc_stub_134:
     .globl vtc_stub_135
 vtc_stub_135:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1080]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2066,6 +2204,7 @@ vtc_stub_135:
     .globl vtc_stub_136
 vtc_stub_136:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1088]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2081,6 +2220,7 @@ vtc_stub_136:
     .globl vtc_stub_137
 vtc_stub_137:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1096]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2096,6 +2236,7 @@ vtc_stub_137:
     .globl vtc_stub_138
 vtc_stub_138:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1104]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2111,6 +2252,7 @@ vtc_stub_138:
     .globl vtc_stub_139
 vtc_stub_139:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1112]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2126,6 +2268,7 @@ vtc_stub_139:
     .globl vtc_stub_140
 vtc_stub_140:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1120]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2141,6 +2284,7 @@ vtc_stub_140:
     .globl vtc_stub_141
 vtc_stub_141:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1128]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2156,6 +2300,7 @@ vtc_stub_141:
     .globl vtc_stub_142
 vtc_stub_142:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1136]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2171,6 +2316,7 @@ vtc_stub_142:
     .globl vtc_stub_143
 vtc_stub_143:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1144]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2186,6 +2332,7 @@ vtc_stub_143:
     .globl vtc_stub_144
 vtc_stub_144:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1152]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2201,6 +2348,7 @@ vtc_stub_144:
     .globl vtc_stub_145
 vtc_stub_145:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1160]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2216,6 +2364,7 @@ vtc_stub_145:
     .globl vtc_stub_146
 vtc_stub_146:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1168]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2231,6 +2380,7 @@ vtc_stub_146:
     .globl vtc_stub_147
 vtc_stub_147:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1176]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2246,6 +2396,7 @@ vtc_stub_147:
     .globl vtc_stub_148
 vtc_stub_148:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1184]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2261,6 +2412,7 @@ vtc_stub_148:
     .globl vtc_stub_149
 vtc_stub_149:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1192]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2276,6 +2428,7 @@ vtc_stub_149:
     .globl vtc_stub_150
 vtc_stub_150:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1200]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2291,6 +2444,7 @@ vtc_stub_150:
     .globl vtc_stub_151
 vtc_stub_151:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1208]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2306,6 +2460,7 @@ vtc_stub_151:
     .globl vtc_stub_152
 vtc_stub_152:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1216]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2321,6 +2476,7 @@ vtc_stub_152:
     .globl vtc_stub_153
 vtc_stub_153:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1224]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2336,6 +2492,7 @@ vtc_stub_153:
     .globl vtc_stub_154
 vtc_stub_154:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1232]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2351,6 +2508,7 @@ vtc_stub_154:
     .globl vtc_stub_155
 vtc_stub_155:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1240]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2366,6 +2524,7 @@ vtc_stub_155:
     .globl vtc_stub_156
 vtc_stub_156:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1248]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2381,6 +2540,7 @@ vtc_stub_156:
     .globl vtc_stub_157
 vtc_stub_157:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1256]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2396,6 +2556,7 @@ vtc_stub_157:
     .globl vtc_stub_158
 vtc_stub_158:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1264]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2411,6 +2572,7 @@ vtc_stub_158:
     .globl vtc_stub_159
 vtc_stub_159:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1272]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2426,6 +2588,7 @@ vtc_stub_159:
     .globl vtc_stub_160
 vtc_stub_160:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1280]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2441,6 +2604,7 @@ vtc_stub_160:
     .globl vtc_stub_161
 vtc_stub_161:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1288]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2456,6 +2620,7 @@ vtc_stub_161:
     .globl vtc_stub_162
 vtc_stub_162:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1296]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2471,6 +2636,7 @@ vtc_stub_162:
     .globl vtc_stub_163
 vtc_stub_163:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1304]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2486,6 +2652,7 @@ vtc_stub_163:
     .globl vtc_stub_164
 vtc_stub_164:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1312]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2501,6 +2668,7 @@ vtc_stub_164:
     .globl vtc_stub_165
 vtc_stub_165:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1320]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2516,6 +2684,7 @@ vtc_stub_165:
     .globl vtc_stub_166
 vtc_stub_166:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1328]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2531,6 +2700,7 @@ vtc_stub_166:
     .globl vtc_stub_167
 vtc_stub_167:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1336]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2546,6 +2716,7 @@ vtc_stub_167:
     .globl vtc_stub_168
 vtc_stub_168:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1344]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2561,6 +2732,7 @@ vtc_stub_168:
     .globl vtc_stub_169
 vtc_stub_169:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1352]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2576,6 +2748,7 @@ vtc_stub_169:
     .globl vtc_stub_170
 vtc_stub_170:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1360]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2591,6 +2764,7 @@ vtc_stub_170:
     .globl vtc_stub_171
 vtc_stub_171:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1368]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2606,6 +2780,7 @@ vtc_stub_171:
     .globl vtc_stub_172
 vtc_stub_172:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1376]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2621,6 +2796,7 @@ vtc_stub_172:
     .globl vtc_stub_173
 vtc_stub_173:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1384]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2636,6 +2812,7 @@ vtc_stub_173:
     .globl vtc_stub_174
 vtc_stub_174:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1392]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2651,6 +2828,7 @@ vtc_stub_174:
     .globl vtc_stub_175
 vtc_stub_175:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1400]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2666,6 +2844,7 @@ vtc_stub_175:
     .globl vtc_stub_176
 vtc_stub_176:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1408]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2681,6 +2860,7 @@ vtc_stub_176:
     .globl vtc_stub_177
 vtc_stub_177:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1416]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2696,6 +2876,7 @@ vtc_stub_177:
     .globl vtc_stub_178
 vtc_stub_178:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1424]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2711,6 +2892,7 @@ vtc_stub_178:
     .globl vtc_stub_179
 vtc_stub_179:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1432]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2726,6 +2908,7 @@ vtc_stub_179:
     .globl vtc_stub_180
 vtc_stub_180:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1440]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2741,6 +2924,7 @@ vtc_stub_180:
     .globl vtc_stub_181
 vtc_stub_181:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1448]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2756,6 +2940,7 @@ vtc_stub_181:
     .globl vtc_stub_182
 vtc_stub_182:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1456]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2771,6 +2956,7 @@ vtc_stub_182:
     .globl vtc_stub_183
 vtc_stub_183:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1464]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2786,6 +2972,7 @@ vtc_stub_183:
     .globl vtc_stub_184
 vtc_stub_184:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1472]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2801,6 +2988,7 @@ vtc_stub_184:
     .globl vtc_stub_185
 vtc_stub_185:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1480]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2816,6 +3004,7 @@ vtc_stub_185:
     .globl vtc_stub_186
 vtc_stub_186:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1488]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2831,6 +3020,7 @@ vtc_stub_186:
     .globl vtc_stub_187
 vtc_stub_187:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1496]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2846,6 +3036,7 @@ vtc_stub_187:
     .globl vtc_stub_188
 vtc_stub_188:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1504]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2861,6 +3052,7 @@ vtc_stub_188:
     .globl vtc_stub_189
 vtc_stub_189:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1512]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2876,6 +3068,7 @@ vtc_stub_189:
     .globl vtc_stub_190
 vtc_stub_190:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1520]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2891,6 +3084,7 @@ vtc_stub_190:
     .globl vtc_stub_191
 vtc_stub_191:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1528]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2906,6 +3100,7 @@ vtc_stub_191:
     .globl vtc_stub_192
 vtc_stub_192:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1536]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2921,6 +3116,7 @@ vtc_stub_192:
     .globl vtc_stub_193
 vtc_stub_193:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1544]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2936,6 +3132,7 @@ vtc_stub_193:
     .globl vtc_stub_194
 vtc_stub_194:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1552]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2951,6 +3148,7 @@ vtc_stub_194:
     .globl vtc_stub_195
 vtc_stub_195:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1560]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2966,6 +3164,7 @@ vtc_stub_195:
     .globl vtc_stub_196
 vtc_stub_196:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1568]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2981,6 +3180,7 @@ vtc_stub_196:
     .globl vtc_stub_197
 vtc_stub_197:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1576]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -2996,6 +3196,7 @@ vtc_stub_197:
     .globl vtc_stub_198
 vtc_stub_198:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1584]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3011,6 +3212,7 @@ vtc_stub_198:
     .globl vtc_stub_199
 vtc_stub_199:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1592]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3026,6 +3228,7 @@ vtc_stub_199:
     .globl vtc_stub_200
 vtc_stub_200:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1600]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3041,6 +3244,7 @@ vtc_stub_200:
     .globl vtc_stub_201
 vtc_stub_201:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1608]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3056,6 +3260,7 @@ vtc_stub_201:
     .globl vtc_stub_202
 vtc_stub_202:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1616]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3071,6 +3276,7 @@ vtc_stub_202:
     .globl vtc_stub_203
 vtc_stub_203:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1624]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3086,6 +3292,7 @@ vtc_stub_203:
     .globl vtc_stub_204
 vtc_stub_204:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1632]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3101,6 +3308,7 @@ vtc_stub_204:
     .globl vtc_stub_205
 vtc_stub_205:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1640]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3116,6 +3324,7 @@ vtc_stub_205:
     .globl vtc_stub_206
 vtc_stub_206:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1648]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3131,6 +3340,7 @@ vtc_stub_206:
     .globl vtc_stub_207
 vtc_stub_207:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1656]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3146,6 +3356,7 @@ vtc_stub_207:
     .globl vtc_stub_208
 vtc_stub_208:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1664]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3161,6 +3372,7 @@ vtc_stub_208:
     .globl vtc_stub_209
 vtc_stub_209:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1672]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3176,6 +3388,7 @@ vtc_stub_209:
     .globl vtc_stub_210
 vtc_stub_210:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1680]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3191,6 +3404,7 @@ vtc_stub_210:
     .globl vtc_stub_211
 vtc_stub_211:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1688]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3206,6 +3420,7 @@ vtc_stub_211:
     .globl vtc_stub_212
 vtc_stub_212:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1696]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3221,6 +3436,7 @@ vtc_stub_212:
     .globl vtc_stub_213
 vtc_stub_213:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1704]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3236,6 +3452,7 @@ vtc_stub_213:
     .globl vtc_stub_214
 vtc_stub_214:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1712]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3251,6 +3468,7 @@ vtc_stub_214:
     .globl vtc_stub_215
 vtc_stub_215:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1720]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3266,6 +3484,7 @@ vtc_stub_215:
     .globl vtc_stub_216
 vtc_stub_216:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1728]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3281,6 +3500,7 @@ vtc_stub_216:
     .globl vtc_stub_217
 vtc_stub_217:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1736]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3296,6 +3516,7 @@ vtc_stub_217:
     .globl vtc_stub_218
 vtc_stub_218:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1744]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3311,6 +3532,7 @@ vtc_stub_218:
     .globl vtc_stub_219
 vtc_stub_219:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1752]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3326,6 +3548,7 @@ vtc_stub_219:
     .globl vtc_stub_220
 vtc_stub_220:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1760]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3341,6 +3564,7 @@ vtc_stub_220:
     .globl vtc_stub_221
 vtc_stub_221:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1768]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3356,6 +3580,7 @@ vtc_stub_221:
     .globl vtc_stub_222
 vtc_stub_222:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1776]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3371,6 +3596,7 @@ vtc_stub_222:
     .globl vtc_stub_223
 vtc_stub_223:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1784]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3386,6 +3612,7 @@ vtc_stub_223:
     .globl vtc_stub_224
 vtc_stub_224:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1792]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3401,6 +3628,7 @@ vtc_stub_224:
     .globl vtc_stub_225
 vtc_stub_225:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1800]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3416,6 +3644,7 @@ vtc_stub_225:
     .globl vtc_stub_226
 vtc_stub_226:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1808]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3431,6 +3660,7 @@ vtc_stub_226:
     .globl vtc_stub_227
 vtc_stub_227:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1816]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3446,6 +3676,7 @@ vtc_stub_227:
     .globl vtc_stub_228
 vtc_stub_228:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1824]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3461,6 +3692,7 @@ vtc_stub_228:
     .globl vtc_stub_229
 vtc_stub_229:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1832]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3476,6 +3708,7 @@ vtc_stub_229:
     .globl vtc_stub_230
 vtc_stub_230:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1840]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3491,6 +3724,7 @@ vtc_stub_230:
     .globl vtc_stub_231
 vtc_stub_231:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1848]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3506,6 +3740,7 @@ vtc_stub_231:
     .globl vtc_stub_232
 vtc_stub_232:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1856]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3521,6 +3756,7 @@ vtc_stub_232:
     .globl vtc_stub_233
 vtc_stub_233:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1864]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3536,6 +3772,7 @@ vtc_stub_233:
     .globl vtc_stub_234
 vtc_stub_234:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1872]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3551,6 +3788,7 @@ vtc_stub_234:
     .globl vtc_stub_235
 vtc_stub_235:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1880]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3566,6 +3804,7 @@ vtc_stub_235:
     .globl vtc_stub_236
 vtc_stub_236:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1888]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3581,6 +3820,7 @@ vtc_stub_236:
     .globl vtc_stub_237
 vtc_stub_237:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1896]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3596,6 +3836,7 @@ vtc_stub_237:
     .globl vtc_stub_238
 vtc_stub_238:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1904]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3611,6 +3852,7 @@ vtc_stub_238:
     .globl vtc_stub_239
 vtc_stub_239:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1912]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3626,6 +3868,7 @@ vtc_stub_239:
     .globl vtc_stub_240
 vtc_stub_240:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1920]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3641,6 +3884,7 @@ vtc_stub_240:
     .globl vtc_stub_241
 vtc_stub_241:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1928]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3656,6 +3900,7 @@ vtc_stub_241:
     .globl vtc_stub_242
 vtc_stub_242:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1936]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3671,6 +3916,7 @@ vtc_stub_242:
     .globl vtc_stub_243
 vtc_stub_243:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1944]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3686,6 +3932,7 @@ vtc_stub_243:
     .globl vtc_stub_244
 vtc_stub_244:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1952]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3701,6 +3948,7 @@ vtc_stub_244:
     .globl vtc_stub_245
 vtc_stub_245:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1960]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3716,6 +3964,7 @@ vtc_stub_245:
     .globl vtc_stub_246
 vtc_stub_246:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1968]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3731,6 +3980,7 @@ vtc_stub_246:
     .globl vtc_stub_247
 vtc_stub_247:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1976]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3746,6 +3996,7 @@ vtc_stub_247:
     .globl vtc_stub_248
 vtc_stub_248:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1984]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3761,6 +4012,7 @@ vtc_stub_248:
     .globl vtc_stub_249
 vtc_stub_249:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 1992]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3776,6 +4028,7 @@ vtc_stub_249:
     .globl vtc_stub_250
 vtc_stub_250:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 2000]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3791,6 +4044,7 @@ vtc_stub_250:
     .globl vtc_stub_251
 vtc_stub_251:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 2008]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3806,6 +4060,7 @@ vtc_stub_251:
     .globl vtc_stub_252
 vtc_stub_252:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 2016]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3821,6 +4076,7 @@ vtc_stub_252:
     .globl vtc_stub_253
 vtc_stub_253:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 2024]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3836,6 +4092,7 @@ vtc_stub_253:
     .globl vtc_stub_254
 vtc_stub_254:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 2032]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
@@ -3851,6 +4108,7 @@ vtc_stub_254:
     .globl vtc_stub_255
 vtc_stub_255:
     push rax
+    lock inc qword ptr [rip + VTC_ALL + 2040]
     mov rax, qword ptr [rip + VTC_CLONE]
     cmp rcx, rax
     jne 5f
