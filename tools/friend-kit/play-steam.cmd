@@ -16,12 +16,21 @@ set ROLE=%~1
 if "%ROLE%"=="" set ROLE=host
 set FRIEND=%~2
 
+rem Find me3: PATH, a portable copy unpacked into this folder (me3\bin\me3.exe), or the installer's folder.
+where %ME3% >nul 2>&1
+if errorlevel 1 if exist "%~dp0me3\bin\me3.exe" set ME3=%~dp0me3\bin\me3.exe
+if "%ME3%"=="me3" if exist "%LOCALAPPDATA%\Programs\me3\bin\me3.exe" set ME3=%LOCALAPPDATA%\Programs\me3\bin\me3.exe
 where %ME3% >nul 2>&1
 if errorlevel 1 if not exist "%ME3%" (
-  echo me3 was not found. Install it from https://github.com/garyttierney/me3/releases ^(official^) or set ME3= to the full path of me3.exe in this file.
+  echo me3 was not found.
+  echo Download me3 0.11.0 from https://github.com/garyttierney/me3/releases ^(official^):
+  echo  - portable: unpack the Windows zip into a folder named me3 next to this script, so that
+  echo    me3\bin\me3.exe is next to play-steam.cmd; or
+  echo  - installer: install it, then open a NEW PowerShell window and run this script again.
   pause
   exit /b 1
 )
+echo Using me3: %ME3%
 if not exist "%~dp0sekiro-coop-mods\sekiro_coop.dll" (echo sekiro_coop.dll is missing next to this script & pause & exit /b 1)
 
 set SEKIRO_COOP_LOG=info,sekiro_coop=debug
