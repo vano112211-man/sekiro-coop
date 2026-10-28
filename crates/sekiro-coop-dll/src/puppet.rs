@@ -1844,6 +1844,7 @@ extern "system" {
     fn MH_CreateHook(target: *mut core::ffi::c_void, detour: *mut core::ffi::c_void, orig: *mut *mut core::ffi::c_void) -> i32;
     fn MH_QueueEnableHook(target: *mut core::ffi::c_void) -> i32;
     fn MH_ApplyQueued() -> i32;
+    fn MH_EnableHook(target: *mut core::ffi::c_void) -> i32;
 }
 const RVA_PLAYERINS_VT: usize = 0x2a2b338;
 const PLAYERINS_SLOTS: usize = 253;
@@ -1887,11 +1888,22 @@ unsafe fn vtcount_install(hero: usize, clone: usize) {
         crate::vtcount::VTC_ORIG[slot] = orig as usize;
         created.push((slot, f));
     }
+    // Run 57: queued enable reported OK but no call was ever counted. Enable
+    // one by one and keep the status codes.
+    let mut enable_fail = 0;
+    let mut first_err = None;
     for (_, f) in &created {
-        MH_QueueEnableHook(*f as *mut _);
+        let st = MH_EnableHook(*f as *mut _);
+        if st != 0 {
+            enable_fail += 1;
+            first_err.get_or_insert(st);
+        }
     }
-    let st = MH_ApplyQueued();
-    tracing::info!(hooked = created.len(), skipped, failed, apply = st, "vtcount: PlayerIns methods hooked");
+    let _ = (MH_QueueEnableHook as usize, MH_ApplyQueued as usize);
+    // Is the patch really there? First byte of a hooked function should be E9 (jmp).
+    let sample: Vec<String> = created.iter().take(5).map(|(_, f)| format!("{:#x}:{:02x}", f - base, *(*f as *const u8))).collect();
+    tracing::info!(hooked = created.len(), skipped, failed, enable_fail, first_err = ?first_err,
+        hero = format!("{hero:#x}"), clone = format!("{clone:#x}"), sample = ?sample, "vtcount: PlayerIns methods hooked");
     *VTC_SLOT_OF.lock() = created.iter().map(|(s, f)| (*s, f - base)).collect();
 }
 
