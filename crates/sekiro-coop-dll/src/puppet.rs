@@ -2259,6 +2259,9 @@ fn dp_session_step() {
     unsafe {
         if let Some(hero) = hero_chr() {
             if DP_HERO_ATTACHED.load(Ordering::Relaxed) != hero {
+                if DP_HERO_ATTACHED.load(Ordering::Relaxed) != 0 {
+                    dp_on_area_change(hero);
+                }
                 let mut s = DP_HERO_SESSION.lock();
                 if *s == 0 {
                     *s = dp_make_session(0x4845_524f).unwrap_or(0); // "HERO"
@@ -2346,6 +2349,38 @@ fn dp_session_step() {
             clone = format!("{:#x}", DP_CLONE_ATTACHED.load(Ordering::Relaxed)),
             "dp session: counters"
         );
+    }
+}
+
+/// Run 68 (first two-player test): the friend rested at an idol, the area
+/// reloaded with a new Hero, and the clone was gone; packets piled up unread.
+/// On a Hero change: keep the clone if WorldChrMan still lists it (warp it
+/// beside the Hero), otherwise forget it and create a new one 10 s later.
+unsafe fn dp_on_area_change(hero: usize) {
+    let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let mut alive = false;
+    if clone != 0 && read_checked::<usize>(clone) == Some(base + 0x2a2b338) {
+        if let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) {
+            alive = (0..0x800usize).step_by(8).any(|o| read_checked::<usize>(wcm + o) == Some(clone));
+        }
+    }
+    DP_INBOX.lock().clear();
+    *DP_SMOOTH_CUR.lock() = None;
+    *DP_SMOOTH_PREV.lock() = None;
+    *DP_CLONE_LAST.lock() = None;
+    if alive {
+        let warped = hero_pos().map(|p| native_warp(clone, [p[0] + 1.5, p[1], p[2]], [0.0; 4]));
+        let s = *DP_CLONE_SESSION.lock();
+        if s != 0 {
+            dp_swap_session(clone, s, "clone after reload");
+        }
+        tracing::info!(hero = format!("{hero:#x}"), ?warped, "dp session: area changed, clone still listed, kept");
+    } else {
+        DP_CLONE_ATTACHED.store(0, Ordering::Relaxed);
+        *SPAWN_FIRST_SEEN.lock() = None;
+        SPAWN_DONE.store(false, Ordering::Relaxed);
+        tracing::info!(hero = format!("{hero:#x}"), old_clone = format!("{clone:#x}"), "dp session: area changed, clone gone, will create a new one");
     }
 }
 
