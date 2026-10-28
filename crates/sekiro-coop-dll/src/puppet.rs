@@ -1243,7 +1243,9 @@ fn spawn_player_step() {
         // path (0xa7a840) does more after 0xa49460: `0x9f5170(chr, id)` (stores
         // the chr type at ChrIns+0x70, then 0x9f64d0) and `chr->vt[+0x90]()`
         // (PlayerIns: 0xa23790). Do the same, byte/slot-checked.
-        if chr != 0 {
+        // Run 36: with these steps (type 1) it became invisible. Off by default.
+        let post = std::env::var("SEKIRO_COOP_NET_PLAYER_POST").map(|v| v == "1").unwrap_or(false);
+        if chr != 0 && post {
             let f_type = base + 0x9f5170;
             let type_ok = readable(f_type, 8)
                 && core::slice::from_raw_parts(f_type as *const u8, 8) == [0x48, 0x83, 0xec, 0x28, 0x89, 0x51, 0x70, 0xe8];
