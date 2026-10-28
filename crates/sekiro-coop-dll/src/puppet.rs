@@ -1123,6 +1123,13 @@ unsafe fn input_copy(puppet: usize) {
             v10 = ?v,
             flags = ?flags,
             puppet_anim = ?anim_of(puppet),
+            dst = format!("{dst:#x}"),
+            puppet_ctrl_120 = ?read_ptr(puppet + 0x50).and_then(|c| read_ptr(c + 0x120)).map(|v| format!("{v:#x}")),
+            puppet_ctrl_358 = ?read_ptr(puppet + 0x50).and_then(|c| read_ptr(c + 0x358)).map(|v| format!("{v:#x}")),
+            src = format!("{src:#x}"),
+            hero_ctrl_120 = ?read_ptr(hero + 0x50).and_then(|c| read_ptr(c + 0x120)).map(|v| format!("{v:#x}")),
+            hero_ctrl_358 = ?read_ptr(hero + 0x50).and_then(|c| read_ptr(c + 0x358)).map(|v| format!("{v:#x}")),
+            puppet_type = ?read_checked::<u32>(puppet + 0x70),
             "puppet input copy"
         );
     }
