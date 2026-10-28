@@ -2471,7 +2471,10 @@ fn spawn_player_step() {
         // Run 63: in DP mode the game drives the clone; the old puppet code
         // (animation reset every 2 s, warps) fought it and made it jump.
         if *DP_SESSION && chr != 0 {
-            tracing::info!("dp session: clone left to the game (no puppet pin, no resets, no warps)");
+            // One warp beside the Hero: the clone is created at the world
+            // origin and the game skips far characters.
+            let warped = hero_pos().map(|p| native_warp(chr, [p[0] + 1.5, p[1], p[2]], [0.0, 0.0, 0.0, 0.0]));
+            tracing::info!(?warped, "dp session: clone left to the game (one initial warp, then no pin, resets or warps)");
         } else if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
             *TARGET.lock() = Some(Target { handle, ptr: chr, char_id });
             *LAST_WRITTEN.lock() = None;
