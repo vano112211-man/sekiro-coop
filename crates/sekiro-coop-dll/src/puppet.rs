@@ -1368,18 +1368,68 @@ static BVAR_COPIES: AtomicU64 = AtomicU64::new(0);
 static BVAR_SIZE_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static BVAR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-unsafe fn bvar_array(chr: usize) -> Option<(usize, usize)> {
-    let bag = read_ptr(chr + 0x1ff8)?;
-    let m = read_ptr(bag + 0x28)?;
-    let x = read_ptr(m + 0x20)?;
-    let data = read_ptr(x + 0x140)?;
-    // Run 51: the +0x148 "size" check failed (no copy happened). Log it once and
-    // copy the 0x400 bytes the scan saw instead.
-    let n = read_checked::<i32>(x + 0x148);
-    if !BVAR_SIZE_LOGGED.swap(true, Ordering::Relaxed) {
-        tracing::info!(x = format!("{x:#x}"), data = format!("{data:#x}"), size_field = ?n, q148 = ?read_checked::<u64>(x + 0x148).map(|v| format!("{v:#x}")), "bvar copy: array header");
+/// Run 52: the path from the scan did not hold (`[X+0x140]` was not a pointer
+/// later). Find the Havok `hkbVariableValueSet` (vftable 0x2c14748) by RTTI
+/// instead: `+0x10` hkArray<word> values (data, size at +0x18), `+0x20`
+/// hkArray<hkVector4>. Searched once per character from the module bag.
+const RVA_HKB_VVS_VT: usize = 0x2c14748;
+static VVS_CACHE: Mutex<Vec<(usize, Vec<usize>)>> = Mutex::new(Vec::new()); // (chr, [vvs...])
+
+unsafe fn find_vvs(chr: usize) -> Vec<usize> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let want = base + RVA_HKB_VVS_VT;
+    let mut found = Vec::new();
+    let Some(bag) = read_ptr(chr + 0x1ff8) else { return found };
+    let mut frontier: Vec<usize> = Vec::new();
+    for m in [0x10usize, 0x28, 0x58] {
+        if let Some(a) = read_ptr(bag + m) {
+            frontier.push(a);
+        }
     }
-    Some((data, 0x400 / 4))
+    let mut seen = std::collections::HashSet::new();
+    let mut visited = 0;
+    for _depth in 0..5 {
+        let mut next = Vec::new();
+        for a in frontier {
+            if !seen.insert(a) || !readable(a, 0x200) {
+                continue;
+            }
+            visited += 1;
+            if visited > 6000 {
+                return found;
+            }
+            if read_checked::<usize>(a) == Some(want) {
+                found.push(a);
+                continue;
+            }
+            let mut off = 0;
+            while off < 0x200 {
+                let v: usize = RawPtr(a + off).read();
+                if v > 0x10000 && v % 8 == 0 && v < 0x7fff_ffff_ffff && v != chr {
+                    next.push(v);
+                }
+                off += 8;
+            }
+        }
+        frontier = next;
+    }
+    found
+}
+
+unsafe fn vvs_of(chr: usize) -> Option<usize> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    {
+        let c = VVS_CACHE.lock();
+        if let Some((_, v)) = c.iter().find(|(k, _)| *k == chr) {
+            return v.first().copied().filter(|a| read_checked::<usize>(*a) == Some(base + RVA_HKB_VVS_VT));
+        }
+    }
+    let v = find_vvs(chr);
+    tracing::info!(chr = format!("{chr:#x}"), found = ?v.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>(),
+        sizes = ?v.iter().map(|a| (read_checked::<i32>(a + 0x18), read_checked::<i32>(a + 0x28))).collect::<Vec<_>>(),
+        "bvar copy: hkbVariableValueSet search");
+    VVS_CACHE.lock().push((chr, v.clone()));
+    v.first().copied()
 }
 
 unsafe fn bvar_copy_from_hero(clone_chr: usize) {
@@ -1387,15 +1437,16 @@ unsafe fn bvar_copy_from_hero(clone_chr: usize) {
         return;
     }
     let Some(hero) = hero_chr() else { return };
-    let (Some((hd, hn)), Some((cd, cn))) = (bvar_array(hero), bvar_array(clone_chr)) else { return };
-    if !BVAR_LOGGED.swap(true, Ordering::Relaxed) {
-        tracing::info!(hero_n = hn, clone_n = cn, hero_data = format!("{hd:#x}"), clone_data = format!("{cd:#x}"), "bvar copy: arrays");
+    let (Some(h), Some(c)) = (vvs_of(hero), vvs_of(clone_chr)) else { return };
+    for (arr, elem) in [(0x10usize, 4usize), (0x20, 16)] {
+        let (Some(hd), Some(cd)) = (read_ptr(h + arr), read_ptr(c + arr)) else { continue };
+        let (Some(hn), Some(cn)) = (read_checked::<i32>(h + arr + 8), read_checked::<i32>(c + arr + 8)) else { continue };
+        let n = hn.min(cn).max(0) as usize;
+        if n == 0 || n > 4096 || hd == cd || !readable(hd, n * elem) || !readable(cd, n * elem) {
+            continue;
+        }
+        core::ptr::copy_nonoverlapping(hd as *const u8, cd as *mut u8, n * elem);
     }
-    let n = hn.min(cn);
-    if hd == cd || !readable(hd, n * 4) || !readable(cd, n * 4) {
-        return;
-    }
-    core::ptr::copy_nonoverlapping(hd as *const u8, cd as *mut u8, n * 4);
     BVAR_COPIES.fetch_add(1, Ordering::Relaxed);
 }
 
