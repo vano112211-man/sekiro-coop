@@ -1245,12 +1245,19 @@ fn spawn_player_step() {
                 let set_type: unsafe extern "system" fn(usize, u32) = core::mem::transmute(f_type);
                 set_type(chr, chr_type);
             }
-            let vt90 = read_ptr(chr).and_then(|v| read_checked::<usize>(v + 0x90));
-            let vt90_ok = vt90 == Some(base + 0xa23790);
-            if vt90_ok {
+            let vt90_slot = read_ptr(chr).and_then(|v| read_checked::<usize>(v + 0x90));
+            if vt90_slot == Some(base + 0xa23790) {
+                // The net path calls vt[+0x90] first, then for types 1, 2, 12
+                // clears bit 3 of ChrIns+0x1a11.
                 let init: unsafe extern "system" fn(usize) = core::mem::transmute(base + 0xa23790);
                 init(chr);
+                if matches!(chr_type, 1 | 2 | 12) {
+                    if let Some(b) = read_checked::<u8>(chr + 0x1a11) {
+                        RawPtr(chr + 0x1a11).write::<u8>(b & 0xf7);
+                    }
+                }
             }
+            let vt90_ok = vt90_slot == Some(base + 0xa23790);
             tracing::info!(
                 type_ok,
                 chr_type,
