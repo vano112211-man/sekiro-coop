@@ -2213,6 +2213,29 @@ fn dp_session_step() {
         *l = Some(std::time::Instant::now());
         let (step, far) = std::mem::take(&mut *DP_CLONE_MAXSTEP.lock());
         let clone_pos = *DP_CLONE_LAST.lock();
+        // Run 65: what the NetworkManipulator asks of the clone. manip+0x10 =
+        // move stick (slot 41), +0x360 target, +0x380 velocity, +0x3cc T,
+        // +0x3d8 mode (also written to chr+0x1bc4), chr+0x1ba0 its target,
+        // chr+0x70 chr type.
+        let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+        if clone != 0 {
+            unsafe {
+                let m = read_ptr(clone + 0x58).unwrap_or(0);
+                let f4 = |a: usize| read_checked::<[f32; 4]>(a).map(|v| [v[0], v[1], v[2]]);
+                tracing::info!(
+                    stick = ?f4(m + 0x10),
+                    target = ?f4(m + 0x360),
+                    vel = ?f4(m + 0x380),
+                    t_since = ?read_checked::<f32>(m + 0x3cc),
+                    mode = ?read_checked::<u32>(m + 0x3d8),
+                    chr_mode = ?read_checked::<u32>(clone + 0x1bc4),
+                    chr_target = ?f4(clone + 0x1ba0),
+                    chr_type = ?read_checked::<u32>(clone + 0x70),
+                    anim = ?anim_of(clone),
+                    "dp session: clone network-manipulator state"
+                );
+            }
+        }
         tracing::info!(
             max_step_m = step,
             max_dist_to_hero_m = far,

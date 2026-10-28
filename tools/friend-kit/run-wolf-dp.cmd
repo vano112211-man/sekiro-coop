@@ -1,6 +1,7 @@
 @echo off
 rem Wolf clone driven by the game's own remote-player packets (DP_REGULAR via a fake PlayerSession).
-rem Argument 1 = send the Hero's packets every frame (default: the game's ~15/s).
+rem Argument 1 = send the Hero's packets every frame (1, default empty: the game's ~15/s).
+rem Argument 2 = the clone's character type for 0x9f5170 (default 0; remote phantoms use 1, 2, 12).
 rem The simulator mirrors the Hero's packets back with a delay; the clone is a kind-2 (Network) PlayerIns.
 rem Uses the test copy and the separate save coop-test.sl2. Optional argument: warp interval in ms.
 setlocal
@@ -75,6 +76,7 @@ set SEKIRO_COOP_CLONE_SUBOBJ=
 set SEKIRO_COOP_CLONE_SLOT0=0
 set SEKIRO_COOP_NET_PLAYER_POST=1
 set SEKIRO_COOP_NET_PLAYER_TYPE=0
+if not "%~2"=="" set SEKIRO_COOP_NET_PLAYER_TYPE=%~2
 set SEKIRO_COOP_CLONE_DIFF=
 set SEKIRO_COOP_BVAR_SCAN=
 set SEKIRO_COOP_BVAR_COPY=
