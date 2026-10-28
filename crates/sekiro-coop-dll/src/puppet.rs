@@ -1501,6 +1501,130 @@ fn clone_diff_step() {
     }
 }
 
+// ---------------------------------------------------------------- behavior var scan
+
+/// Run 50: find where the Hero's behavior variables (MoveSpeedLevel, MoveAngle
+/// ...) live. Walk pointers from the Hero's module bag (+0x1ff8: modules
+/// 0x10, 0x28, 0x58) up to depth 3, read 0x400 bytes per object, and take
+/// two float snapshots: A at pin+10 s (owner stands), B at pin+25 s (owner
+/// runs). Report slots that are 0 in A and 0.5..3 in B, with their pointer
+/// path, and the clone's value at the same path. `SEKIRO_COOP_BVAR_SCAN=1`.
+static BVAR_SCAN: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_BVAR_SCAN").map(|v| v == "1").unwrap_or(false)
+});
+struct ScanNode {
+    addr: usize,
+    path: Vec<usize>, // offsets: first is the module-bag offset, then pointer offsets
+}
+static BVAR_NODES: Mutex<Vec<(Vec<usize>, Vec<f32>)>> = Mutex::new(Vec::new());
+static BVAR_STAGE: AtomicUsize = AtomicUsize::new(0);
+const BVAR_OBJ: usize = 0x400;
+
+unsafe fn bvar_walk(chr: usize) -> Vec<ScanNode> {
+    let mut out = Vec::new();
+    let Some(bag) = read_ptr(chr + 0x1ff8) else { return out };
+    let mut frontier: Vec<ScanNode> = Vec::new();
+    for m in [0x10usize, 0x28, 0x58] {
+        if let Some(a) = read_ptr(bag + m) {
+            frontier.push(ScanNode { addr: a, path: vec![m] });
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for depth in 0..4 {
+        let mut next = Vec::new();
+        for n in frontier {
+            if !seen.insert(n.addr) || !readable(n.addr, BVAR_OBJ) {
+                continue;
+            }
+            if depth < 3 {
+                let mut off = 0;
+                while off < BVAR_OBJ {
+                    let v: usize = RawPtr(n.addr + off).read();
+                    if v > 0x10000 && v % 8 == 0 && v < 0x7fff_ffff_ffff && v != chr && !seen.contains(&v) {
+                        let mut p = n.path.clone();
+                        p.push(off);
+                        next.push(ScanNode { addr: v, path: p });
+                    }
+                    off += 8;
+                }
+            }
+            out.push(n);
+            if out.len() > 4000 {
+                return out;
+            }
+        }
+        frontier = next;
+    }
+    out
+}
+
+unsafe fn bvar_follow(chr: usize, path: &[usize]) -> Option<usize> {
+    let bag = read_ptr(chr + 0x1ff8)?;
+    let mut a = read_ptr(bag + path[0])?;
+    for off in &path[1..] {
+        a = read_ptr(a + off)?;
+    }
+    Some(a)
+}
+
+fn bvar_scan_step() {
+    if !*BVAR_SCAN {
+        return;
+    }
+    let Some(t0) = *PIN_TIME.lock() else { return };
+    let el = t0.elapsed().as_secs();
+    let stage = BVAR_STAGE.load(Ordering::Relaxed);
+    let Some(hero) = hero_chr() else { return };
+    unsafe {
+        if stage == 0 && el >= 10 {
+            BVAR_STAGE.store(1, Ordering::Relaxed);
+            let nodes = bvar_walk(hero);
+            let mut store = BVAR_NODES.lock();
+            store.clear();
+            for n in nodes {
+                if readable(n.addr, BVAR_OBJ) {
+                    let f: Vec<f32> = (0..BVAR_OBJ / 4).map(|i| RawPtr(n.addr + i * 4).read::<f32>()).collect();
+                    store.push((n.path, f));
+                }
+            }
+            tracing::info!(objects = store.len(), "bvar scan: snapshot A (standing)");
+        } else if stage == 1 && el >= 25 {
+            BVAR_STAGE.store(2, Ordering::Relaxed);
+            let clone = (*TARGET.lock()).map(|t| t.ptr);
+            let store = BVAR_NODES.lock();
+            let mut hits: Vec<String> = Vec::new();
+            for (path, a) in store.iter() {
+                let Some(addr) = bvar_follow(hero, path) else { continue };
+                if !readable(addr, BVAR_OBJ) {
+                    continue;
+                }
+                for i in 0..BVAR_OBJ / 4 {
+                    let b: f32 = RawPtr(addr + i * 4).read();
+                    if a[i] == 0.0 && b.is_finite() && (0.5..=3.0).contains(&b.abs()) {
+                        let cv = clone
+                            .and_then(|c| bvar_follow(c, path))
+                            .filter(|ca| readable(*ca + i * 4, 4))
+                            .map(|ca| RawPtr(ca + i * 4).read::<f32>());
+                        if hits.len() < 300 {
+                            hits.push(format!(
+                                "{}+{:#x} hero={:.3} clone={:?}",
+                                path.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(">"),
+                                i * 4,
+                                b,
+                                cv
+                            ));
+                        }
+                    }
+                }
+            }
+            for c in hits.chunks(20) {
+                tracing::info!(lines = ?c, "bvar scan hit");
+            }
+            tracing::info!(total = hits.len(), "bvar scan: done (B = running)");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- net player
 
 /// Wolf-looking puppet (offline, 1.06): `0xa49460(WorldChrMan, id, data)` →
@@ -1989,6 +2113,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         return;
     }
     clone_diff_step();
+    bvar_scan_step();
     let _ = TICKER_TID.set(format!("{:?}", std::thread::current().id()));
     CUR_FRAME.store(frame, Ordering::Relaxed);
     write_step(true);
