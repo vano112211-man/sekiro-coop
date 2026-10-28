@@ -2047,6 +2047,14 @@ static DP_POS_CHECK: Mutex<(u64, u64)> = Mutex::new((0, 0)); // (matched, checke
 static DP_SMOOTH_PREV: Mutex<Option<(std::time::Instant, [f32; 3])>> = Mutex::new(None);
 static DP_SMOOTH_CUR: Mutex<Option<(std::time::Instant, Vec<u8>)>> = Mutex::new(None);
 static DP_SMOOTH_SYNTH: AtomicU64 = AtomicU64::new(0);
+/// Run 67: at one packet per frame T = 1/60 s, so the snap rule (> 20 m/s)
+/// fires for any 0.33 m error, and the clone stands ~0.2-0.35 m above the
+/// packet height: it snapped every frame. Synthetic packets go out at most
+/// every `SEKIRO_COOP_DP_SMOOTH_MS` (33, i.e. 30/s, snap only above 0.66 m).
+static DP_SMOOTH_MS: Lazy<f32> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_SMOOTH_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(33.0)
+});
+static DP_SMOOTH_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 fn dp_pos_of(b: &[u8]) -> Option<[f32; 3]> {
     if b.len() < DP_POS_OFF + 12 {
@@ -2170,12 +2178,20 @@ fn dp_smooth_next(real: Option<Vec<u8>>, now: std::time::Instant) -> Option<Vec<
             *prev = dp_pos_of(&b).map(|p| (t, p));
         }
         *cur = Some((now, r.clone()));
+        *DP_SMOOTH_LAST.lock() = Some(now);
         // The real packet goes out with the previous position (start of the
         // segment): the clone then walks to it over the next interval.
         return Some(match *prev {
             Some((_, pp)) => dp_with_pos(&r, pp),
             None => r,
         });
+    }
+    {
+        let mut last = DP_SMOOTH_LAST.lock();
+        if last.map(|t| now.duration_since(t).as_secs_f32() * 1000.0 < *DP_SMOOTH_MS).unwrap_or(false) {
+            return None;
+        }
+        *last = Some(now);
     }
     let (t1, b1) = cur.as_ref()?;
     let (t0, p0) = (*prev)?;
