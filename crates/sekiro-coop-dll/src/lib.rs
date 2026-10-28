@@ -732,6 +732,12 @@ pub fn on_frame() {
                         PacketType::State,
                         &PacketBody::PlayerSnapshot(snap),
                     );
+                    if let Some(bytes) = puppet::hero_manip_bytes() {
+                        let _ = sess.send_unreliable(
+                            PacketType::State,
+                            &PacketBody::ManipState { frame, bytes },
+                        );
+                    }
                 }
 
                 // Broadcast EnemyStates at 5 Hz (every 12 ticks) — the
@@ -884,6 +890,9 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
             // Store the latest remote snapshot; periodic log prints it.
             *m.remote_player.lock() = Some(snap);
             puppet::note_remote_snapshot();
+        }
+        PacketBody::ManipState { bytes, .. } => {
+            puppet::note_remote_manip(bytes);
         }
         PacketBody::BridgeEvents { frame, events } => {
             tracing::info!(

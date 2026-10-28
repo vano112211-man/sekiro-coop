@@ -151,6 +151,9 @@ fn main() -> ExitCode {
     let mut last_rx_enemies: Vec<EnemyState> = Vec::new();
     let mut history: std::collections::VecDeque<(Instant, [f32; 3], u32, f32, u32, u32)> =
         std::collections::VecDeque::new();
+    // Mirrored input state (ManipState), replayed with the same delay.
+    let mut manip_history: std::collections::VecDeque<(Instant, Vec<u8>)> =
+        std::collections::VecDeque::new();
 
     loop {
         frame += 1;
@@ -208,6 +211,19 @@ fn main() -> ExitCode {
             action_seq,
         };
 
+        if mirror {
+            let cutoff = Instant::now() - Duration::from_millis(mirror_delay_ms);
+            let mut due: Option<Vec<u8>> = None;
+            while manip_history.front().map(|(t, _)| *t <= cutoff).unwrap_or(false) {
+                due = manip_history.pop_front().map(|(_, b)| b);
+            }
+            if let Some(bytes) = due {
+                let _ = session.send_unreliable(
+                    PacketType::State,
+                    &PacketBody::ManipState { frame, bytes },
+                );
+            }
+        }
         if let Err(e) =
             session.send_unreliable(PacketType::State, &PacketBody::PlayerSnapshot(snap))
         {
@@ -249,6 +265,9 @@ fn main() -> ExitCode {
             match body {
                 PacketBody::Handshake(hp) => {
                     answer_handshake(&session, role, &hp);
+                }
+                PacketBody::ManipState { bytes, .. } if mirror => {
+                    manip_history.push_back((Instant::now(), bytes));
                 }
                 PacketBody::PlayerSnapshot(s) => {
                     if mirror {

@@ -813,6 +813,27 @@ fn write_step(from_ticker: bool) {
         if *INPUT_COPY {
             input_copy(t.ptr);
         }
+        if *CORRECT_ONLY {
+            // Input drives the clone; only pull it back when it drifts.
+            if let (Some(r), Some(p)) = (remote_target(), phys_pos_addr(t.ptr)) {
+                let cur: [f32; 3] = RawPtr(p).read();
+                let off_by = dist([cur[0], 0.0, cur[2]], [r[0], 0.0, r[2]]);
+                let due = LAST_WARP_AT
+                    .lock()
+                    .map(|w| w.elapsed() >= std::time::Duration::from_millis(250))
+                    .unwrap_or(true);
+                if (off_by > *CORRECT_M || (cur[1] - r[1]).abs() > 3.0) && due {
+                    if let Some(rot) = rot_of(t.ptr) {
+                        if native_warp(t.ptr, r, rot) {
+                            *LAST_WARP_AT.lock() = Some(std::time::Instant::now());
+                            CORRECTIONS.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                REMOTE_FRESH_STEPS.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
         {
             if *NO_POS {
                 // Put it beside the Hero once, then leave movement to the input.
@@ -1095,6 +1116,13 @@ static NO_POS: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_NOPOS").map(|v| v == "1").unwrap_or(false)
 });
 static INPUT_COPIES: AtomicU64 = AtomicU64::new(0);
+static CORRECT_ONLY: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_CORRECT_ONLY").map(|v| v == "1").unwrap_or(false)
+});
+static CORRECT_M: Lazy<f32> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_PUPPET_CORRECT_M").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5)
+});
+static CORRECTIONS: AtomicU64 = AtomicU64::new(0);
 static INPUT_LOGGED: AtomicU64 = AtomicU64::new(0);
 const MANIP_COPY_FROM: usize = 0x10;
 const MANIP_COPY_TO: usize = 0x300;
@@ -1156,8 +1184,66 @@ static CLONE_VT: Mutex<[usize; 64]> = Mutex::new([0; 64]);
 static CLONE_MANIP: AtomicUsize = AtomicUsize::new(0);
 static CLONE_UPDATES: AtomicU64 = AtomicU64::new(0);
 
+const PAD_COPY_LEN: usize = (0x300 - 0x10) + (0x340 - 0x310) + (0x410 - 0x360) + (0x428 - 0x420) + (0x450 - 0x438);
+static REMOTE_MANIP: Mutex<Option<(Vec<u8>, std::time::Instant)>> = Mutex::new(None);
+static REMOTE_MANIP_RX: AtomicU64 = AtomicU64::new(0);
+static REMOTE_MANIP_USED: AtomicU64 = AtomicU64::new(0);
+
+/// The Hero's manipulator state in PAD_COPY_RANGES order, for the network.
+pub fn hero_manip_bytes() -> Option<Vec<u8>> {
+    if !*SEND_MANIP {
+        return None;
+    }
+    let hero = hero_chr()?;
+    unsafe {
+        let src = read_ptr(hero + 0x58)?;
+        if read_checked::<usize>(src) != Some(MODULE_BASE.load(Ordering::Relaxed) + RVA_PAD_MANIP_VT)
+            || !readable(src, 0x450)
+        {
+            return None;
+        }
+        let mut out = Vec::with_capacity(PAD_COPY_LEN);
+        for (a, b) in PAD_COPY_RANGES {
+            out.extend_from_slice(core::slice::from_raw_parts((src + a) as *const u8, b - a));
+        }
+        Some(out)
+    }
+}
+static SEND_MANIP: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_SEND_MANIP").map(|v| v != "0").unwrap_or(true)
+});
+
+pub fn note_remote_manip(bytes: Vec<u8>) {
+    if bytes.len() == PAD_COPY_LEN {
+        REMOTE_MANIP_RX.fetch_add(1, Ordering::Relaxed);
+        *REMOTE_MANIP.lock() = Some((bytes, std::time::Instant::now()));
+    }
+}
+
 unsafe extern "system" fn clone_pad_update(this: usize, _a: usize, _b: usize, _c: usize) -> usize {
     CLONE_UPDATES.fetch_add(1, Ordering::Relaxed);
+    if !readable(this, 0x450) {
+        return 0;
+    }
+    // Network source: the remote player's input state.
+    if *SOURCE_NET {
+        let g = REMOTE_MANIP.lock();
+        if let Some((b, at)) = g.as_ref() {
+            if at.elapsed() < std::time::Duration::from_millis(500) {
+                let mut off = 0;
+                for (a, e) in PAD_COPY_RANGES {
+                    core::ptr::copy_nonoverlapping(b.as_ptr().add(off), (this + a) as *mut u8, e - a);
+                    off += e - a;
+                }
+                REMOTE_MANIP_USED.fetch_add(1, Ordering::Relaxed);
+                return 0;
+            }
+        }
+        // No fresh input: stand still (clear the base input state).
+        drop(g);
+        core::ptr::write_bytes((this + 0x10) as *mut u8, 0, 0x300 - 0x10);
+        return 0;
+    }
     let Some(hero) = hero_chr() else { return 0 };
     let Some(src) = read_ptr(hero + 0x58) else { return 0 };
     if src == this || !readable(src, 0x450) || !readable(this, 0x450) {
@@ -1844,6 +1930,9 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         stop_resets = STOP_RESETS.load(Ordering::Relaxed),
         anim_reset_refused = ANIM_RESET_REFUSED.load(Ordering::Relaxed),
         clone_updates = CLONE_UPDATES.load(Ordering::Relaxed),
+        remote_manip_rx = REMOTE_MANIP_RX.load(Ordering::Relaxed),
+        remote_manip_used = REMOTE_MANIP_USED.load(Ordering::Relaxed),
+        corrections = CORRECTIONS.load(Ordering::Relaxed),
         action_anim = *ACTION_ANIM,
         forces = FORCES.load(Ordering::Relaxed),
         force_refused = FORCE_REFUSED.load(Ordering::Relaxed),

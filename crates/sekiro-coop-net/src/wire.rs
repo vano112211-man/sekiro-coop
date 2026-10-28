@@ -108,6 +108,9 @@ pub enum PacketBody {
     Heartbeat { remote_frame: u64, ping_tag: u32 },
     Handshake(HandshakePayload),
     Quit { reason: String },
+    /// The sender's processed player input (its PadManipulator state, run 38
+    /// layout): the receiver's clone PlayerIns plays the same moves.
+    ManipState { frame: u64, bytes: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
