@@ -2005,9 +2005,21 @@ static DP_CLONE_ATTACHED: AtomicUsize = AtomicUsize::new(0);
 static DP_OUTBOX: Mutex<Vec<(u32, Vec<u8>)>> = Mutex::new(Vec::new());
 static DP_INBOX: Mutex<std::collections::VecDeque<(std::time::Instant, u32, Vec<u8>)>> =
     Mutex::new(std::collections::VecDeque::new());
-static DP_RECV_TYPES: Mutex<[u64; 16]> = Mutex::new([0; 16]);
-static DP_GIVEN_TYPES: Mutex<[u64; 16]> = Mutex::new([0; 16]);
-static DP_SIZES: Mutex<[usize; 16]> = Mutex::new([0; 16]);
+/// Run 61: the second packet type is above 15 (it showed up only in the
+/// clamped bucket), so types are counted by value: (type, count, last size).
+static DP_SEND_BY_TYPE: Mutex<Vec<(u32, u64, usize)>> = Mutex::new(Vec::new());
+static DP_RECV_BY_TYPE: Mutex<Vec<(u32, u64, usize)>> = Mutex::new(Vec::new());
+static DP_GIVEN_BY_TYPE: Mutex<Vec<(u32, u64, usize)>> = Mutex::new(Vec::new());
+
+fn dp_count(v: &Mutex<Vec<(u32, u64, usize)>>, ty: u32, size: usize) {
+    let mut v = v.lock();
+    if let Some(e) = v.iter_mut().find(|e| e.0 == ty) {
+        e.1 += 1;
+        e.2 = size;
+    } else if v.len() < 32 {
+        v.push((ty, 1, size));
+    }
+}
 static DP_SENDS: AtomicU64 = AtomicU64::new(0);
 static DP_SEND_TYPES: Mutex<[u64; 8]> = Mutex::new([0; 8]);
 static DP_RECV_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -2026,10 +2038,10 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
         t[(ty as usize).min(7)] += 1;
     }
     let n = size as usize;
-    if ty > 15 || n == 0 || n > DP_MAX || buf.is_null() || !readable(buf as usize, n) {
+    dp_count(&DP_SEND_BY_TYPE, ty, n);
+    if n == 0 || n > DP_MAX || buf.is_null() || !readable(buf as usize, n) {
         return 0;
     }
-    DP_SIZES.lock()[ty as usize] = n;
     let bytes = core::slice::from_raw_parts(buf, n).to_vec();
     if ty == 1 {
         let mut f = DP_FIRST_BYTES.lock();
@@ -2055,7 +2067,7 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
 /// the oldest due packet of the requested type only.
 unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const u64, ty: u32) -> *mut u64 {
     DP_RECV_CALLS.fetch_add(1, Ordering::Relaxed);
-    DP_RECV_TYPES.lock()[(ty as usize).min(15)] += 1;
+    dp_count(&DP_RECV_BY_TYPE, ty, 0);
     *out = 0;
     *out.add(1) = 0;
     *out.add(2) = 0;
@@ -2077,7 +2089,7 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
             *out.add(1) = cap as u64;
             *out.add(2) = p.len() as u64;
             DP_RECV_GIVEN.fetch_add(1, Ordering::Relaxed);
-            DP_GIVEN_TYPES.lock()[(ty as usize).min(15)] += 1;
+            dp_count(&DP_GIVEN_BY_TYPE, ty, p.len());
         }
     }
     out
@@ -2155,9 +2167,9 @@ fn dp_session_step() {
             send_types = ?*DP_SEND_TYPES.lock(),
             recv_calls = DP_RECV_CALLS.load(Ordering::Relaxed),
             recv_given = DP_RECV_GIVEN.load(Ordering::Relaxed),
-            recv_types = ?*DP_RECV_TYPES.lock(),
-            given_types = ?*DP_GIVEN_TYPES.lock(),
-            last_sizes = ?*DP_SIZES.lock(),
+            sent_by_type = ?*DP_SEND_BY_TYPE.lock(),
+            recv_by_type = ?*DP_RECV_BY_TYPE.lock(),
+            given_by_type = ?*DP_GIVEN_BY_TYPE.lock(),
             inbox = DP_INBOX.lock().len(),
             first_bytes = ?*DP_FIRST_BYTES.lock(),
             clone = format!("{:#x}", DP_CLONE_ATTACHED.load(Ordering::Relaxed)),
@@ -2193,7 +2205,7 @@ pub fn dp_take_outbox() -> Vec<(u32, Vec<u8>)> {
 
 /// A packet from the remote player: queue it for the clone.
 pub fn dp_note_remote(ty: u32, bytes: Vec<u8>) {
-    if bytes.len() > DP_MAX || ty > 15 {
+    if bytes.len() > DP_MAX {
         return;
     }
     let mut q = DP_INBOX.lock();
