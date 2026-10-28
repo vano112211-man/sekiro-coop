@@ -1,6 +1,6 @@
 @echo off
 rem Wolf clone driven by the game's own remote-player packets (DP_REGULAR via a fake PlayerSession).
-rem Argument 1 = send the Hero's packets every frame (1, default empty: the game's ~15/s).
+rem Argument 1 = nosmooth to turn off the clone's position smoothing (default on).
 rem Argument 2 = the clone's character type for 0x9f5170 (default 0; remote phantoms use 1, 2, 12).
 rem The simulator mirrors the Hero's packets back with a delay; the clone is a kind-2 (Network) PlayerIns.
 rem Uses the test copy and the separate save coop-test.sl2. Optional argument: warp interval in ms.
@@ -87,7 +87,9 @@ set SEKIRO_COOP_VTCOUNT=
 set SEKIRO_COOP_DP_PROBE=
 set SEKIRO_COOP_DP_SESSION=1
 set SEKIRO_COOP_DP_LOOPBACK=
-set SEKIRO_COOP_DP_SEND_EVERY_FRAME=%~1
+set SEKIRO_COOP_DP_SEND_EVERY_FRAME=
+set SEKIRO_COOP_DP_SMOOTH=1
+if /I "%~1"=="nosmooth" set SEKIRO_COOP_DP_SMOOTH=
 set SEKIRO_COOP_CLONE_PATCH=
 set SEKIRO_COOP_PUPPET_PHASES=
 if not "%~1"=="" if not "%~1"=="-" set SEKIRO_COOP_PUPPET_WARP_MS=%~1

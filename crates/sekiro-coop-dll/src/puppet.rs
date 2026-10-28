@@ -2034,6 +2034,36 @@ static DP_SEND_TYPES: Mutex<[u64; 8]> = Mutex::new([0; 8]);
 static DP_RECV_CALLS: AtomicU64 = AtomicU64::new(0);
 static DP_RECV_GIVEN: AtomicU64 = AtomicU64::new(0);
 static DP_GAVE_TYPE1: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Run 66: a remote player is placed from type-1 positions (~15/s), so the clone
+/// moves in 15 Hz steps. `SEKIRO_COOP_DP_SMOOTH=1`: between real packets, hand
+/// the clone the latest packet once per update with its position (f32 x,y,z at
+/// byte 16, checked on the sender against the Hero) interpolated between the
+/// last two packets.
+static DP_SMOOTH: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_SMOOTH").map(|v| v == "1").unwrap_or(false)
+});
+const DP_POS_OFF: usize = 16;
+static DP_POS_CHECK: Mutex<(u64, u64)> = Mutex::new((0, 0)); // (matched, checked)
+static DP_SMOOTH_PREV: Mutex<Option<(std::time::Instant, [f32; 3])>> = Mutex::new(None);
+static DP_SMOOTH_CUR: Mutex<Option<(std::time::Instant, Vec<u8>)>> = Mutex::new(None);
+static DP_SMOOTH_SYNTH: AtomicU64 = AtomicU64::new(0);
+
+fn dp_pos_of(b: &[u8]) -> Option<[f32; 3]> {
+    if b.len() < DP_POS_OFF + 12 {
+        return None;
+    }
+    let f = |i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    let p = [f(DP_POS_OFF), f(DP_POS_OFF + 4), f(DP_POS_OFF + 8)];
+    (p.iter().all(|v| v.is_finite() && v.abs() < 100_000.0)).then_some(p)
+}
+
+fn dp_with_pos(b: &[u8], p: [f32; 3]) -> Vec<u8> {
+    let mut v = b.to_vec();
+    for (k, x) in p.iter().enumerate() {
+        v[DP_POS_OFF + 4 * k..DP_POS_OFF + 4 * k + 4].copy_from_slice(&x.to_le_bytes());
+    }
+    v
+}
 static DP_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static DP_FIRST_BYTES: Mutex<Option<String>> = Mutex::new(None);
 
@@ -2054,6 +2084,13 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
     }
     let bytes = core::slice::from_raw_parts(buf, n).to_vec();
     if ty == 1 {
+        if let (Some(pp), Some(hp)) = (dp_pos_of(&bytes), hero_pos()) {
+            let mut c = DP_POS_CHECK.lock();
+            c.1 += 1;
+            if dist(pp, hp) < 1.0 {
+                c.0 += 1;
+            }
+        }
         let mut f = DP_FIRST_BYTES.lock();
         if f.is_none() {
             *f = Some(bytes.iter().take(64).map(|b| format!("{b:02x}")).collect());
@@ -2103,6 +2140,7 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
         let i = q.iter().position(|(due, t, _)| *t == ty && *due <= now);
         i.and_then(|i| q.remove(i)).map(|(_, _, b)| b)
     };
+    let pkt = if ty == 1 && *DP_SMOOTH { dp_smooth_next(pkt, now) } else { pkt };
     if let Some(p) = pkt {
         if !dbuf.is_null() && p.len() <= cap {
             core::ptr::copy_nonoverlapping(p.as_ptr(), dbuf, p.len());
@@ -2117,6 +2155,40 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
         }
     }
     out
+}
+
+/// Smoothing for type 1: remember the last two real packets; every update give
+/// the latest one with its position moved along from the previous one.
+fn dp_smooth_next(real: Option<Vec<u8>>, now: std::time::Instant) -> Option<Vec<u8>> {
+    let mut cur = DP_SMOOTH_CUR.lock();
+    let mut prev = DP_SMOOTH_PREV.lock();
+    if let Some(r) = real {
+        if dp_pos_of(&r).is_none() {
+            return Some(r);
+        }
+        if let Some((t, b)) = cur.take() {
+            *prev = dp_pos_of(&b).map(|p| (t, p));
+        }
+        *cur = Some((now, r.clone()));
+        // The real packet goes out with the previous position (start of the
+        // segment): the clone then walks to it over the next interval.
+        return Some(match *prev {
+            Some((_, pp)) => dp_with_pos(&r, pp),
+            None => r,
+        });
+    }
+    let (t1, b1) = cur.as_ref()?;
+    let (t0, p0) = (*prev)?;
+    let p1 = dp_pos_of(b1)?;
+    let age = now.duration_since(*t1).as_secs_f32();
+    if age > 0.5 {
+        return None; // sender went quiet: stop repeating
+    }
+    let span = t1.duration_since(t0).as_secs_f32().clamp(0.03, 0.25);
+    let f = (age / span).clamp(0.0, 1.0);
+    let p = [p0[0] + (p1[0] - p0[0]) * f, p0[1] + (p1[1] - p0[1]) * f, p0[2] + (p1[2] - p0[2]) * f];
+    DP_SMOOTH_SYNTH.fetch_add(1, Ordering::Relaxed);
+    Some(dp_with_pos(b1, p))
 }
 
 /// Build a fake session: a copy of the Debug session's 12-slot vtable with
@@ -2249,6 +2321,8 @@ fn dp_session_step() {
             recv_calls = DP_RECV_CALLS.load(Ordering::Relaxed),
             recv_given = DP_RECV_GIVEN.load(Ordering::Relaxed),
             sent_by_type = ?*DP_SEND_BY_TYPE.lock(),
+            pos_at_16_matches_hero = ?*DP_POS_CHECK.lock(),
+            smooth_synth = DP_SMOOTH_SYNTH.load(Ordering::Relaxed),
             recv_by_type = ?*DP_RECV_BY_TYPE.lock(),
             given_by_type = ?*DP_GIVEN_BY_TYPE.lock(),
             inbox = DP_INBOX.lock().len(),
