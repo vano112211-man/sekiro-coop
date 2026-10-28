@@ -1986,7 +1986,7 @@ const RVA_NULL_SESSION_VT: usize = 0x2b86308;
 /// queue (manager at 0x3d93618, 32-entry ring) the developers used to test remote
 /// players on one machine. Its slots 0/1/6 are replaced like the Null ones.
 const RVA_DEBUG_SESSION_VT: usize = 0x2b86048;
-const DP_MAX: usize = 0x400;
+const DP_MAX: usize = 0x4000;
 
 /// A fake PlayerSession: vtable pointer, then a tag so logs can tell them apart.
 #[repr(C)]
