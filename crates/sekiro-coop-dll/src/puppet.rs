@@ -1546,7 +1546,46 @@ unsafe fn diff_region(label: &str, a: usize, b: usize, len: usize, out: &mut Vec
     }
 }
 
+static MODULE_LOG_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Run 54: list the module bag (+0x1ff8, 40 slots) of Hero and clone by vtable RVA,
+/// and the first pointers inside the behavior module (+0x28), on the ticker thread.
+fn module_log_step() {
+    if std::env::var("SEKIRO_COOP_MODULE_LOG").map(|v| v != "1").unwrap_or(true) || MODULE_LOG_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(t) = *PIN_TIME.lock() else { return };
+    if t.elapsed() < std::time::Duration::from_secs(5) {
+        return;
+    }
+    MODULE_LOG_DONE.store(true, Ordering::Relaxed);
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let (Some(hero), Some(tg)) = (hero_chr(), *TARGET.lock()) else { return };
+    for (who, chr) in [("hero", hero), ("clone", tg.ptr)] {
+        unsafe {
+            let Some(bag) = read_ptr(chr + 0x1ff8) else { continue };
+            let mut rows = Vec::new();
+            for k in 0..40usize {
+                let m = read_ptr(bag + k * 8);
+                let vt = m.and_then(|m| read_checked::<usize>(m)).map(|v| v.wrapping_sub(base));
+                rows.push(format!("{:#x}:{}", k * 8, vt.map(|v| format!("{v:#x}")).unwrap_or_else(|| "-".into())));
+            }
+            tracing::info!(who, modules = ?rows, "module bag");
+            if let Some(bm) = read_ptr(bag + 0x28) {
+                let mut inner = Vec::new();
+                for off in (0..0x100usize).step_by(8) {
+                    let p = read_ptr(bm + off);
+                    let vt = p.and_then(|p| read_checked::<usize>(p)).map(|v| v.wrapping_sub(base)).filter(|v| *v < 0x4000000);
+                    inner.push(format!("{off:#x}:{}", vt.map(|v| format!("{v:#x}")).unwrap_or_else(|| if p.is_some() { "ptr".into() } else { "-".into() })));
+                }
+                tracing::info!(who, inner = ?inner, "behavior module +0x28 fields");
+            }
+        }
+    }
+}
+
 fn clone_diff_step() {
+    module_log_step();
     if !*CLONE_DIFF || CLONE_DIFF_DONE.load(Ordering::Relaxed) {
         return;
     }
