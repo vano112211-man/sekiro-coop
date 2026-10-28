@@ -2033,6 +2033,7 @@ static DP_SENDS: AtomicU64 = AtomicU64::new(0);
 static DP_SEND_TYPES: Mutex<[u64; 8]> = Mutex::new([0; 8]);
 static DP_RECV_CALLS: AtomicU64 = AtomicU64::new(0);
 static DP_RECV_GIVEN: AtomicU64 = AtomicU64::new(0);
+static DP_GAVE_TYPE1: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DP_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static DP_FIRST_BYTES: Mutex<Option<String>> = Mutex::new(None);
 
@@ -2085,6 +2086,17 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
     }
     let dbuf = *desc as *mut u8;
     let cap = (*desc.add(1) & 0xffff_ffff) as usize;
+    // Run 64: per received type-1 packet the NetworkManipulator (0x7ec9e0)
+    // sets velocity = (target - pos) / (T * 1.2), T = seconds since the last
+    // packet ([manip+0x3cc], zeroed after each packet). T == 0 (a second
+    // packet in the same update), T > 2 s or > 20 m/s makes it snap
+    // (+0x350 = 1). So hand out at most one type-1 packet per update: after
+    // one, the next call (same 0x8d8050 loop) answers empty.
+    if ty == 1 {
+        if DP_GAVE_TYPE1.swap(false, Ordering::Relaxed) {
+            return out;
+        }
+    }
     let now = std::time::Instant::now();
     let pkt = {
         let mut q = DP_INBOX.lock();
@@ -2098,6 +2110,9 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
             *out.add(1) = cap as u64;
             *out.add(2) = p.len() as u64;
             DP_RECV_GIVEN.fetch_add(1, Ordering::Relaxed);
+            if ty == 1 {
+                DP_GAVE_TYPE1.store(true, Ordering::Relaxed);
+            }
             dp_count(&DP_GIVEN_BY_TYPE, ty, p.len());
         }
     }
