@@ -1269,6 +1269,64 @@ unsafe extern "system" fn clone_pad_update(this: usize, _a: usize, _b: usize, _c
     0
 }
 
+/// Run 40: slot 0 was never called. ChrCtrl's update (0x7dee05..) calls the
+/// manipulator's vt[+0x48](this, dt, ChrCtrl, 0) when its logic bit is set,
+/// else vt[+0x50](this, dt, ChrCtrl); PadManipulator overrides both (0x7ef120,
+/// 0x7ef300). Wrap them: run the original, then overwrite the processed
+/// fields with the remote (or Hero) state before ChrCtrl consumes them.
+static PAD_UPD48: AtomicUsize = AtomicUsize::new(0);
+static PAD_UPD50: AtomicUsize = AtomicUsize::new(0);
+static CLONE_UPD_CALLS: AtomicU64 = AtomicU64::new(0);
+type PadUpdFn = unsafe extern "system" fn(usize, f32, usize, usize) -> usize;
+
+unsafe fn clone_apply_state(this: usize) {
+    if *SOURCE_NET {
+        let g = REMOTE_MANIP.lock();
+        if let Some((b, at)) = g.as_ref() {
+            if at.elapsed() < std::time::Duration::from_millis(500) {
+                let mut off = 0;
+                for (a, e) in PAD_COPY_RANGES {
+                    core::ptr::copy_nonoverlapping(b.as_ptr().add(off), (this + a) as *mut u8, e - a);
+                    off += e - a;
+                }
+                REMOTE_MANIP_USED.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        drop(g);
+        core::ptr::write_bytes((this + 0x10) as *mut u8, 0, 0x300 - 0x10);
+        return;
+    }
+    let Some(hero) = hero_chr() else { return };
+    let Some(src) = read_ptr(hero + 0x58) else { return };
+    if src == this || !readable(src, 0x450) {
+        return;
+    }
+    for (a, b) in PAD_COPY_RANGES {
+        core::ptr::copy_nonoverlapping((src + a) as *const u8, (this + a) as *mut u8, b - a);
+    }
+}
+
+unsafe extern "system" fn clone_upd48(this: usize, dt: f32, ctrl: usize, flag: usize) -> usize {
+    CLONE_UPD_CALLS.fetch_add(1, Ordering::Relaxed);
+    let orig: PadUpdFn = core::mem::transmute(PAD_UPD48.load(Ordering::Relaxed));
+    let r = orig(this, dt, ctrl, flag);
+    if readable(this, 0x450) {
+        clone_apply_state(this);
+    }
+    r
+}
+
+unsafe extern "system" fn clone_upd50(this: usize, dt: f32, ctrl: usize, flag: usize) -> usize {
+    CLONE_UPD_CALLS.fetch_add(1, Ordering::Relaxed);
+    let orig: PadUpdFn = core::mem::transmute(PAD_UPD50.load(Ordering::Relaxed));
+    let r = orig(this, dt, ctrl, flag);
+    if readable(this, 0x450) {
+        clone_apply_state(this);
+    }
+    r
+}
+
 /// Swap the clone's manipulator vtable once (game thread).
 unsafe fn clone_pad_install(chr: usize) {
     if !*CLONE_PAD || CLONE_MANIP.load(Ordering::Relaxed) != 0 {
@@ -1290,6 +1348,15 @@ unsafe fn clone_pad_install(chr: usize) {
         vt[i] = RawPtr(src_vt + i * 8).read::<usize>();
     }
     vt[0] = clone_pad_update as usize;
+    PAD_UPD48.store(vt[0x48 / 8], Ordering::Relaxed);
+    PAD_UPD50.store(vt[0x50 / 8], Ordering::Relaxed);
+    if vt[0x48 / 8] != base + 0x7ef120 || vt[0x50 / 8] != base + 0x7ef300 {
+        tracing::warn!("clone pad: unexpected update slots, not swapping");
+        CLONE_MANIP.store(usize::MAX, Ordering::Relaxed);
+        return;
+    }
+    vt[0x48 / 8] = clone_upd48 as usize;
+    vt[0x50 / 8] = clone_upd50 as usize;
     let vt_addr = vt.as_ptr() as usize;
     drop(vt);
     RawPtr(m).write::<usize>(vt_addr);
@@ -1946,6 +2013,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         clone_updates = CLONE_UPDATES.load(Ordering::Relaxed),
         remote_manip_rx = REMOTE_MANIP_RX.load(Ordering::Relaxed),
         remote_manip_used = REMOTE_MANIP_USED.load(Ordering::Relaxed),
+        clone_upd_calls = CLONE_UPD_CALLS.load(Ordering::Relaxed),
         corrections = CORRECTIONS.load(Ordering::Relaxed),
         action_anim = *ACTION_ANIM,
         forces = FORCES.load(Ordering::Relaxed),
