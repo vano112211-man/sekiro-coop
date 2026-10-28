@@ -1,5 +1,5 @@
 @echo off
-rem Sekiro co-op over Steam (sekiro-coop, experimental). No IP, no port forwarding.
+rem Sekiro co-op over Steam (sekiro-coop, experimental). No IP, no port forwarding. Your friend appears as a Wolf.
 rem Usage:  play-steam.cmd host <friend SteamID64>     (the one whose world it is)
 rem         play-steam.cmd client <friend SteamID64>
 rem Without a SteamID the game starts anyway and the log shows YOUR SteamID64 to send to your friend.
@@ -30,22 +30,24 @@ set SEKIRO_COOP_TRANSPORT=steam
 set SEKIRO_COOP_STEAM_PEER=%FRIEND%
 set SEKIRO_COOP_BIND=
 set SEKIRO_COOP_PEER_ADDR=
+set SEKIRO_COOP_SEND_MANIP=0
 set SEKIRO_COOP_PUPPET_PROBE=1
-set SEKIRO_COOP_PUPPET_SOURCE=net
-set SEKIRO_COOP_PUPPET_FREEZE_AI=
-set SEKIRO_COOP_PUPPET_WARP_MS=
-set SEKIRO_COOP_PUPPET_CATALOG=
-set SEKIRO_COOP_PUPPET_CATALOG_MS=3000
-set SEKIRO_COOP_PUPPET_SLOTSCAN=
-set SEKIRO_COOP_SPAWN=5060:auto
-set SEKIRO_COOP_SPAWN_PLAYER=
-set SEKIRO_COOP_PUPPET_LOGIC_OFF=
-set SEKIRO_COOP_PUPPET_TEAM=
-set SEKIRO_COOP_PUPPET_ANIM_PASSTHROUGH=
-set SEKIRO_COOP_PUPPET_INPUT_COPY=
-set SEKIRO_COOP_PUPPET_NOPOS=
-set SEKIRO_COOP_PUPPET_PHASES=
-
+set SEKIRO_COOP_PUPPET_SOURCE=
+set SEKIRO_COOP_SPAWN=
+set SEKIRO_COOP_SPAWN_PLAYER=1
+set SEKIRO_COOP_PUPPET_LOGIC_OFF=0
+set SEKIRO_COOP_PUPPET_TEAM=-1
+set SEKIRO_COOP_NET_PLAYER_KIND=2
+set SEKIRO_COOP_CLONE_PAD=
+set SEKIRO_COOP_CLONE_RANGES=none
+set SEKIRO_COOP_PUPPET_NOPOS=1
+set SEKIRO_COOP_NET_PLAYER_POST=1
+set SEKIRO_COOP_NET_PLAYER_TYPE=0
+set SEKIRO_COOP_DP_SESSION=1
+set SEKIRO_COOP_DP_LOOPBACK=
+set SEKIRO_COOP_DP_SMOOTH=1
+set SEKIRO_COOP_VTCOUNT=
+set SEKIRO_COOP_DP_PROBE=
 
 set EXEARG=
 if not "%SEKIRO_EXE%"=="" set EXEARG=-e "%SEKIRO_EXE%"
