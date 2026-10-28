@@ -1357,12 +1357,54 @@ static CLONE_SUBOBJ: Lazy<bool> = Lazy::new(|| {
 });
 static SUBOBJ_COPIES: AtomicU64 = AtomicU64::new(0);
 
+/// Run 50 scan: while the Hero ran, `[[[bag+0x28]+0x20]+0x140]+0x344` went 0 → 2.0
+/// (MoveSpeedLevel-like) and stayed 0 on the clone. `[X+0x20]+0x140` looks like the
+/// data pointer of an hkArray of behavior variable values (size at +0x148).
+/// `SEKIRO_COOP_BVAR_COPY=1`: copy the Hero's values into the clone's array.
+static BVAR_COPY: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_BVAR_COPY").map(|v| v == "1").unwrap_or(false)
+});
+static BVAR_COPIES: AtomicU64 = AtomicU64::new(0);
+static BVAR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+unsafe fn bvar_array(chr: usize) -> Option<(usize, usize)> {
+    let bag = read_ptr(chr + 0x1ff8)?;
+    let m = read_ptr(bag + 0x28)?;
+    let x = read_ptr(m + 0x20)?;
+    let data = read_ptr(x + 0x140)?;
+    let n = read_checked::<i32>(x + 0x148)?;
+    if n <= 0 || n > 4096 {
+        return None;
+    }
+    Some((data, n as usize))
+}
+
+unsafe fn bvar_copy_from_hero(clone_chr: usize) {
+    if !*BVAR_COPY {
+        return;
+    }
+    let Some(hero) = hero_chr() else { return };
+    let (Some((hd, hn)), Some((cd, cn))) = (bvar_array(hero), bvar_array(clone_chr)) else { return };
+    if !BVAR_LOGGED.swap(true, Ordering::Relaxed) {
+        tracing::info!(hero_n = hn, clone_n = cn, hero_data = format!("{hd:#x}"), clone_data = format!("{cd:#x}"), "bvar copy: arrays");
+    }
+    let n = hn.min(cn);
+    if hd == cd || !readable(hd, n * 4) || !readable(cd, n * 4) {
+        return;
+    }
+    core::ptr::copy_nonoverlapping(hd as *const u8, cd as *mut u8, n * 4);
+    BVAR_COPIES.fetch_add(1, Ordering::Relaxed);
+}
+
 unsafe extern "system" fn clone_upd48(this: usize, dt: f32, ctrl: usize, flag: usize) -> usize {
     CLONE_UPD_CALLS.fetch_add(1, Ordering::Relaxed);
     let orig: PadUpdFn = core::mem::transmute(PAD_UPD48.load(Ordering::Relaxed));
     let r = orig(this, dt, ctrl, flag);
     if readable(this, 0x450) {
         clone_apply_state(this);
+    }
+    if let Some(t) = *TARGET.lock() {
+        bvar_copy_from_hero(t.ptr);
     }
     r
 }
@@ -1373,6 +1415,9 @@ unsafe extern "system" fn clone_upd50(this: usize, dt: f32, ctrl: usize, flag: u
     let r = orig(this, dt, ctrl, flag);
     if readable(this, 0x450) {
         clone_apply_state(this);
+    }
+    if let Some(t) = *TARGET.lock() {
+        bvar_copy_from_hero(t.ptr);
     }
     r
 }
@@ -2278,6 +2323,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         remote_manip_used = REMOTE_MANIP_USED.load(Ordering::Relaxed),
         clone_upd_calls = CLONE_UPD_CALLS.load(Ordering::Relaxed),
         subobj_copies = SUBOBJ_COPIES.load(Ordering::Relaxed),
+        bvar_copies = BVAR_COPIES.load(Ordering::Relaxed),
         corrections = CORRECTIONS.load(Ordering::Relaxed),
         nudges = NUDGES.load(Ordering::Relaxed),
         clone_off_by = ?t.and_then(|t| unsafe { phys_pos_addr(t.ptr).map(|p| RawPtr(p).read::<[f32; 3]>()) }).zip(remote_target()).map(|(a, b)| dist([a[0], 0.0, a[2]], [b[0], 0.0, b[2]])),
