@@ -111,6 +111,10 @@ pub enum PacketBody {
     /// The sender's processed player input (its PadManipulator state, run 38
     /// layout): the receiver's clone PlayerIns plays the same moves.
     ManipState { frame: u64, bytes: Vec<u8> },
+    /// The sender's own DP_REGULAR packet, as the game serialised it for a
+    /// PlayerSession (0x8da080); the receiver hands it to its clone's
+    /// NetworkManipulator.
+    DpRegular { frame: u64, bytes: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

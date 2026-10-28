@@ -154,6 +154,9 @@ fn main() -> ExitCode {
     // Mirrored input state (ManipState), replayed with the same delay.
     let mut manip_history: std::collections::VecDeque<(Instant, Vec<u8>)> =
         std::collections::VecDeque::new();
+    // Mirrored DP_REGULAR packets, replayed with the same delay.
+    let mut dp_history: std::collections::VecDeque<(Instant, Vec<u8>)> =
+        std::collections::VecDeque::new();
 
     loop {
         frame += 1;
@@ -223,6 +226,14 @@ fn main() -> ExitCode {
                     &PacketBody::ManipState { frame, bytes },
                 );
             }
+            while dp_history.front().map(|(t, _)| *t <= cutoff).unwrap_or(false) {
+                if let Some((_, bytes)) = dp_history.pop_front() {
+                    let _ = session.send_unreliable(
+                        PacketType::State,
+                        &PacketBody::DpRegular { frame, bytes },
+                    );
+                }
+            }
         }
         if let Err(e) =
             session.send_unreliable(PacketType::State, &PacketBody::PlayerSnapshot(snap))
@@ -268,6 +279,9 @@ fn main() -> ExitCode {
                 }
                 PacketBody::ManipState { bytes, .. } if mirror => {
                     manip_history.push_back((Instant::now(), bytes));
+                }
+                PacketBody::DpRegular { bytes, .. } if mirror => {
+                    dp_history.push_back((Instant::now(), bytes));
                 }
                 PacketBody::PlayerSnapshot(s) => {
                     if mirror {

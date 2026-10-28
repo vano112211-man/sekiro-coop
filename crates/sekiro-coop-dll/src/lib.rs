@@ -776,6 +776,12 @@ pub fn on_frame() {
                             &PacketBody::ManipState { frame, bytes },
                         );
                     }
+                    for bytes in puppet::dp_take_outbox() {
+                        let _ = sess.send_unreliable(
+                            PacketType::State,
+                            &PacketBody::DpRegular { frame, bytes },
+                        );
+                    }
                 }
 
                 // Broadcast EnemyStates at 5 Hz (every 12 ticks) — the
@@ -931,6 +937,9 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
         }
         PacketBody::ManipState { bytes, .. } => {
             puppet::note_remote_manip(bytes);
+        }
+        PacketBody::DpRegular { bytes, .. } => {
+            puppet::dp_note_remote(bytes);
         }
         PacketBody::BridgeEvents { frame, events } => {
             tracing::info!(

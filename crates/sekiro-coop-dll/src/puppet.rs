@@ -1945,6 +1945,247 @@ fn vtcount_report() {
     *last = Some((h, c));
 }
 
+// ---------------------------------------------------------------- DP session
+
+/// The game's own remote-player pipe (offline RE, 2026-10-28, 1.06):
+///
+/// * Every PlayerIns has a PlayerSessionHolder at +0x2020 (ctor 0x1061d90,
+///   vt 0x2b862f8); holder+0x18 is a `PlayerSession*`, by default the shared
+///   PlayerNullSession singleton (vt 0x2b86308, object at 0x3d938d0).
+/// * PlayerSession vt (12 slots): [1] Send(this, buf, size, type),
+///   [6] Receive(this, out{buf, cap, size}, desc{buf, cap}, type) -> out,
+///   [11] identity. PlayerNetworkSession (vt 0x2b86150) routes them to the
+///   packet storage at [0x3d67c90]; the Null session drops them.
+/// * PadManipulator vt[11] (0x7eeb50) fills its sync object (+0x350) from
+///   the character and calls 0x8da080: serialize (0x8d7000, list
+///   CSPacketInheritList16 at +0x2808, then +0x27e4/+0x27f4 and +0x2960)
+///   and `session->Send(buf, size, 1)`.
+/// * NetworkManipulator (kind 2) update loops 0x8d8050:
+///   `session->Receive(.., {buf, 0x400}, 1)` then deserializes into its sync
+///   object and applies it (0x8dea40).
+///
+/// So: give the Hero a fake session whose Send copies the packets out, and
+/// give a kind-2 clone a fake session whose Receive hands them back. If the
+/// game drives a remote player with these packets, the clone walks.
+/// `SEKIRO_COOP_DP_SESSION=1`; `SEKIRO_COOP_DP_LOOPBACK=1` feeds the Hero's
+/// own packets to the local clone after `SEKIRO_COOP_DP_DELAY_MS` (1000).
+static DP_SESSION: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_SESSION").map(|v| v == "1").unwrap_or(false)
+});
+static DP_LOOPBACK: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_LOOPBACK").map(|v| v == "1").unwrap_or(false)
+});
+static DP_DELAY: Lazy<std::time::Duration> = Lazy::new(|| {
+    std::time::Duration::from_millis(
+        std::env::var("SEKIRO_COOP_DP_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000),
+    )
+});
+const RVA_SESSION_HOLDER_VT: usize = 0x2b862f8;
+const RVA_NULL_SESSION_VT: usize = 0x2b86308;
+const DP_MAX: usize = 0x400;
+
+/// A fake PlayerSession: vtable pointer, then a tag so logs can tell them apart.
+#[repr(C)]
+struct FakeSession {
+    vt: usize,
+    tag: usize,
+    _pad: [usize; 14],
+}
+static DP_HERO_SESSION: Mutex<usize> = Mutex::new(0);
+static DP_CLONE_SESSION: Mutex<usize> = Mutex::new(0);
+static DP_HERO_ATTACHED: AtomicUsize = AtomicUsize::new(0);
+static DP_CLONE_ATTACHED: AtomicUsize = AtomicUsize::new(0);
+static DP_OUTBOX: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static DP_INBOX: Mutex<std::collections::VecDeque<(std::time::Instant, Vec<u8>)>> =
+    Mutex::new(std::collections::VecDeque::new());
+static DP_SENDS: AtomicU64 = AtomicU64::new(0);
+static DP_SEND_TYPES: Mutex<[u64; 8]> = Mutex::new([0; 8]);
+static DP_RECV_CALLS: AtomicU64 = AtomicU64::new(0);
+static DP_RECV_GIVEN: AtomicU64 = AtomicU64::new(0);
+static DP_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static DP_FIRST_BYTES: Mutex<Option<String>> = Mutex::new(None);
+
+unsafe extern "system" fn dp_fake_dtor(this: usize, _flags: u32) -> usize {
+    this // never free: the object is leaked on purpose
+}
+
+unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, ty: u32) -> u32 {
+    DP_SENDS.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut t = DP_SEND_TYPES.lock();
+        t[(ty as usize).min(7)] += 1;
+    }
+    let n = size as usize;
+    if ty != 1 || n == 0 || n > DP_MAX || buf.is_null() || !readable(buf as usize, n) {
+        return 0;
+    }
+    let bytes = core::slice::from_raw_parts(buf, n).to_vec();
+    {
+        let mut f = DP_FIRST_BYTES.lock();
+        if f.is_none() {
+            *f = Some(bytes.iter().take(64).map(|b| format!("{b:02x}")).collect());
+        }
+    }
+    if *DP_LOOPBACK {
+        let mut q = DP_INBOX.lock();
+        q.push_back((std::time::Instant::now() + *DP_DELAY, bytes.clone()));
+        while q.len() > 600 {
+            q.pop_front();
+        }
+    }
+    let mut o = DP_OUTBOX.lock();
+    if o.len() < 64 {
+        o.push(bytes);
+    }
+    0
+}
+
+/// out = {u8* buf, u32 cap, u32 size}; desc = {u8* buf, u32 cap}.
+unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const u64, _ty: u32) -> *mut u64 {
+    DP_RECV_CALLS.fetch_add(1, Ordering::Relaxed);
+    *out = 0;
+    *out.add(1) = 0;
+    *out.add(2) = 0;
+    if desc.is_null() {
+        return out;
+    }
+    let dbuf = *desc as *mut u8;
+    let cap = (*desc.add(1) & 0xffff_ffff) as usize;
+    let now = std::time::Instant::now();
+    let pkt = {
+        let mut q = DP_INBOX.lock();
+        match q.front() {
+            Some((due, _)) if *due <= now => q.pop_front().map(|(_, b)| b),
+            _ => None,
+        }
+    };
+    if let Some(p) = pkt {
+        if !dbuf.is_null() && p.len() <= cap {
+            core::ptr::copy_nonoverlapping(p.as_ptr(), dbuf, p.len());
+            *out = dbuf as u64;
+            *out.add(1) = cap as u64;
+            *out.add(2) = p.len() as u64;
+            DP_RECV_GIVEN.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    out
+}
+
+/// Build a fake session: a copy of the Null session's 12-slot vtable with
+/// [0] dtor, [1] Send, [6] Receive replaced.
+unsafe fn dp_make_session(tag: usize) -> Option<usize> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let null_vt = base + RVA_NULL_SESSION_VT;
+    if !readable(null_vt, 12 * 8) {
+        return None;
+    }
+    let mut vt: Vec<usize> = (0..12).map(|i| *((null_vt + i * 8) as *const usize)).collect();
+    vt[0] = dp_fake_dtor as usize;
+    vt[1] = dp_fake_send as usize;
+    vt[6] = dp_fake_recv as usize;
+    let vt: &'static [usize] = Box::leak(vt.into_boxed_slice());
+    let obj: &'static mut FakeSession = Box::leak(Box::new(FakeSession { vt: vt.as_ptr() as usize, tag, _pad: [0; 14] }));
+    Some(obj as *mut FakeSession as usize)
+}
+
+/// Swap chr's PlayerSessionHolder (+0x2020) session (+0x18) for `session`,
+/// only if the holder and the current session are what we expect.
+unsafe fn dp_swap_session(chr: usize, session: usize, who: &str) -> bool {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let holder = chr + 0x2020;
+    let holder_vt = read_checked::<usize>(holder);
+    let cur = read_ptr(holder + 0x18);
+    let cur_vt = cur.and_then(|c| read_checked::<usize>(c));
+    let ok = holder_vt == Some(base + RVA_SESSION_HOLDER_VT)
+        && (cur_vt == Some(base + RVA_NULL_SESSION_VT) || cur == Some(session));
+    tracing::info!(
+        who,
+        chr = format!("{chr:#x}"),
+        holder_vt_rva = ?holder_vt.map(|v| format!("{:#x}", v.wrapping_sub(base))),
+        session_vt_rva = ?cur_vt.map(|v| format!("{:#x}", v.wrapping_sub(base))),
+        ok,
+        "dp session: swap"
+    );
+    if ok && cur != Some(session) {
+        RawPtr(holder + 0x18).write::<usize>(session);
+    }
+    ok
+}
+
+/// Called every tick: attach the Hero's fake session (again after a reload)
+/// and log counters every 2 s.
+fn dp_session_step() {
+    if !*DP_SESSION {
+        return;
+    }
+    unsafe {
+        if let Some(hero) = hero_chr() {
+            if DP_HERO_ATTACHED.load(Ordering::Relaxed) != hero {
+                let mut s = DP_HERO_SESSION.lock();
+                if *s == 0 {
+                    *s = dp_make_session(0x4845_524f).unwrap_or(0); // "HERO"
+                }
+                if *s != 0 && dp_swap_session(hero, *s, "hero") {
+                    DP_HERO_ATTACHED.store(hero, Ordering::Relaxed);
+                } else {
+                    DP_HERO_ATTACHED.store(hero, Ordering::Relaxed); // don't retry every tick
+                }
+            }
+        }
+    }
+    let mut l = DP_LAST_LOG.lock();
+    if l.map(|t| t.elapsed() >= std::time::Duration::from_secs(2)).unwrap_or(true) {
+        *l = Some(std::time::Instant::now());
+        tracing::info!(
+            sends = DP_SENDS.load(Ordering::Relaxed),
+            send_types = ?*DP_SEND_TYPES.lock(),
+            recv_calls = DP_RECV_CALLS.load(Ordering::Relaxed),
+            recv_given = DP_RECV_GIVEN.load(Ordering::Relaxed),
+            inbox = DP_INBOX.lock().len(),
+            first_bytes = ?*DP_FIRST_BYTES.lock(),
+            clone = format!("{:#x}", DP_CLONE_ATTACHED.load(Ordering::Relaxed)),
+            "dp session: counters"
+        );
+    }
+}
+
+/// After a clone is created: give it the receiving fake session.
+unsafe fn dp_attach_clone(chr: usize) {
+    if !*DP_SESSION {
+        return;
+    }
+    let mut s = DP_CLONE_SESSION.lock();
+    if *s == 0 {
+        *s = dp_make_session(0x434c_4f4e).unwrap_or(0); // "CLON"
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let manip_vt = read_ptr(chr + 0x58).and_then(|m| read_checked::<usize>(m)).map(|v| v.wrapping_sub(base));
+    tracing::info!(manip_vt_rva = ?manip_vt.map(|v| format!("{v:#x}")), "dp session: clone manipulator (want 0x29d4530 Network)");
+    if *s != 0 && dp_swap_session(chr, *s, "clone") {
+        DP_CLONE_ATTACHED.store(chr, Ordering::Relaxed);
+    }
+}
+
+/// Packets the Hero sent since the last call, for the network.
+pub fn dp_take_outbox() -> Vec<Vec<u8>> {
+    if !*DP_SESSION {
+        return Vec::new();
+    }
+    std::mem::take(&mut *DP_OUTBOX.lock())
+}
+
+/// A packet from the remote player: queue it for the clone.
+pub fn dp_note_remote(bytes: Vec<u8>) {
+    if bytes.len() > DP_MAX {
+        return;
+    }
+    let mut q = DP_INBOX.lock();
+    q.push_back((std::time::Instant::now(), bytes));
+    while q.len() > 600 {
+        q.pop_front();
+    }
+}
+
 // ---------------------------------------------------------------- DP_REGULAR probe
 
 /// Run 58: the game's remote-player pipeline. PadManipulator+0x350 and
@@ -2148,6 +2389,7 @@ fn spawn_player_step() {
             );
         }
         if chr != 0 {
+            dp_attach_clone(chr);
             clone_pad_install(chr);
             install_is_local_hook(chr);
             if let Some(h) = hero {
@@ -2498,6 +2740,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     if !*ENABLED {
         return;
     }
+    dp_session_step();
     clone_diff_step();
     bvar_scan_step();
     let _ = TICKER_TID.set(format!("{:?}", std::thread::current().id()));
