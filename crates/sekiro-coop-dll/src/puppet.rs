@@ -1137,6 +1137,66 @@ unsafe fn input_copy(puppet: usize) {
     }
 }
 
+// ---------------------------------------------------------------- clone pad
+
+/// Run 37: a PlayerIns with its own PadManipulator (kind 1) took all of the
+/// owner's input (the Hero stopped responding). PadManipulator vt[0]
+/// (0x7f2210 → 0x7ef930) is its per-frame update that reads the pad. For the
+/// clone only, swap in a copy of its vtable whose slot 0 does not read the pad
+/// but copies the Hero manipulator's processed state (the source the network
+/// will replace later). Ranges skip the sub-object pointers at +0x350/+0x358
+/// and the qwords at +0x300, +0x410/+0x418, +0x428/+0x430.
+static CLONE_PAD: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_CLONE_PAD").map(|v| v == "1").unwrap_or(false)
+});
+const RVA_PAD_MANIP_VT: usize = 0x29d4b30;
+const PAD_COPY_RANGES: [(usize, usize); 5] =
+    [(0x10, 0x300), (0x310, 0x340), (0x360, 0x410), (0x420, 0x428), (0x438, 0x450)];
+static CLONE_VT: Mutex<[usize; 64]> = Mutex::new([0; 64]);
+static CLONE_MANIP: AtomicUsize = AtomicUsize::new(0);
+static CLONE_UPDATES: AtomicU64 = AtomicU64::new(0);
+
+unsafe extern "system" fn clone_pad_update(this: usize, _a: usize, _b: usize, _c: usize) -> usize {
+    CLONE_UPDATES.fetch_add(1, Ordering::Relaxed);
+    let Some(hero) = hero_chr() else { return 0 };
+    let Some(src) = read_ptr(hero + 0x58) else { return 0 };
+    if src == this || !readable(src, 0x450) || !readable(this, 0x450) {
+        return 0;
+    }
+    for (a, b) in PAD_COPY_RANGES {
+        core::ptr::copy_nonoverlapping((src + a) as *const u8, (this + a) as *mut u8, b - a);
+    }
+    0
+}
+
+/// Swap the clone's manipulator vtable once (game thread).
+unsafe fn clone_pad_install(chr: usize) {
+    if !*CLONE_PAD || CLONE_MANIP.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let Some(m) = read_ptr(chr + 0x58) else { return };
+    if read_checked::<usize>(m) != Some(base + RVA_PAD_MANIP_VT) || !readable(m, 0x450) {
+        tracing::warn!(vt = ?read_checked::<usize>(m).map(|v| format!("{:#x}", v.wrapping_sub(base))), "clone pad: not a PadManipulator, not swapping");
+        CLONE_MANIP.store(usize::MAX, Ordering::Relaxed);
+        return;
+    }
+    let src_vt = base + RVA_PAD_MANIP_VT;
+    if !readable(src_vt, 64 * 8) {
+        return;
+    }
+    let mut vt = CLONE_VT.lock();
+    for i in 0..64 {
+        vt[i] = RawPtr(src_vt + i * 8).read::<usize>();
+    }
+    vt[0] = clone_pad_update as usize;
+    let vt_addr = vt.as_ptr() as usize;
+    drop(vt);
+    RawPtr(m).write::<usize>(vt_addr);
+    CLONE_MANIP.store(m, Ordering::Relaxed);
+    tracing::info!(manip = format!("{m:#x}"), "clone pad: vtable swapped, slot 0 copies the Hero's manipulator");
+}
+
 // ---------------------------------------------------------------- net player
 
 /// Wolf-looking puppet (offline, 1.06): `0xa49460(WorldChrMan, id, data)` →
@@ -1276,6 +1336,9 @@ fn spawn_player_step() {
                 chr_type_now = ?read_checked::<u32>(chr + 0x70),
                 "net player: post-create steps"
             );
+        }
+        if chr != 0 {
+            clone_pad_install(chr);
         }
         if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
             *TARGET.lock() = Some(Target { handle, ptr: chr, char_id });
@@ -1780,6 +1843,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         anim_resets = ANIM_RESETS.load(Ordering::Relaxed),
         stop_resets = STOP_RESETS.load(Ordering::Relaxed),
         anim_reset_refused = ANIM_RESET_REFUSED.load(Ordering::Relaxed),
+        clone_updates = CLONE_UPDATES.load(Ordering::Relaxed),
         action_anim = *ACTION_ANIM,
         forces = FORCES.load(Ordering::Relaxed),
         force_refused = FORCE_REFUSED.load(Ordering::Relaxed),
