@@ -1419,6 +1419,65 @@ unsafe fn clone_pad_install(chr: usize) {
     tracing::info!(manip = format!("{m:#x}"), "clone pad: vtable swapped, slot 0 copies the Hero's manipulator");
 }
 
+// ---------------------------------------------------------------- hero/clone diff
+
+/// Run 47: the clone glides without walk animations from its first run,
+/// whatever the input. Dump small-value differences between the Hero and the
+/// clone (both standing) in the ChrIns, its ChrCtrl (+0x50) and the module bag
+/// (+0x1ff8, first 32 module pointers), to find a state flag that gates
+/// locomotion. `SEKIRO_COOP_CLONE_DIFF=1`; runs once, 15 s after the pin.
+static CLONE_DIFF: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_CLONE_DIFF").map(|v| v == "1").unwrap_or(false)
+});
+static CLONE_DIFF_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+unsafe fn diff_region(label: &str, a: usize, b: usize, len: usize, out: &mut Vec<String>) {
+    if !readable(a, len) || !readable(b, len) {
+        out.push(format!("{label}: unreadable"));
+        return;
+    }
+    let mut i = 0;
+    while i + 4 <= len {
+        let x: u32 = RawPtr(a + i).read();
+        let y: u32 = RawPtr(b + i).read();
+        if x != y && x < 0x10000 && y < 0x10000 && out.len() < 400 {
+            out.push(format!("{label}+{i:#x}: hero={x:#x} clone={y:#x}"));
+        }
+        i += 4;
+    }
+}
+
+fn clone_diff_step() {
+    if !*CLONE_DIFF || CLONE_DIFF_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(t) = *PIN_TIME.lock() else { return };
+    if t.elapsed() < std::time::Duration::from_secs(15) {
+        return;
+    }
+    CLONE_DIFF_DONE.store(true, Ordering::Relaxed);
+    let (Some(hero), Some(tg)) = (hero_chr(), *TARGET.lock()) else { return };
+    let clone = tg.ptr;
+    let mut out = Vec::new();
+    unsafe {
+        diff_region("chr", hero, clone, 0x2300, &mut out);
+        if let (Some(a), Some(b)) = (read_ptr(hero + 0x50), read_ptr(clone + 0x50)) {
+            diff_region("ctrl", a, b, 0x600, &mut out);
+        }
+        if let (Some(ba), Some(bb)) = (read_ptr(hero + 0x1ff8), read_ptr(clone + 0x1ff8)) {
+            for k in 0..32usize {
+                if let (Some(a), Some(b)) = (read_ptr(ba + k * 8), read_ptr(bb + k * 8)) {
+                    diff_region(&format!("mod{:#x}", k * 8), a, b, 0x300, &mut out);
+                }
+            }
+        }
+    }
+    for chunk in out.chunks(20) {
+        tracing::info!(lines = ?chunk, "clone diff");
+    }
+    tracing::info!(total = out.len(), "clone diff done");
+}
+
 // ---------------------------------------------------------------- net player
 
 /// Wolf-looking puppet (offline, 1.06): `0xa49460(WorldChrMan, id, data)` →
@@ -1906,6 +1965,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     if !*ENABLED {
         return;
     }
+    clone_diff_step();
     let _ = TICKER_TID.set(format!("{:?}", std::thread::current().id()));
     CUR_FRAME.store(frame, Ordering::Relaxed);
     write_step(true);
