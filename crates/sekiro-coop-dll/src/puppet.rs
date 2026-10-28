@@ -1123,10 +1123,38 @@ fn spawn_player_step() {
             tracing::warn!("net player: checks failed (bytes or PlayerGameData mismatch), not creating");
             return;
         }
+        // Run 33 crashed at 0x803bfd: chr->vt[+0x308]() returned PlayerIns+0x21f8,
+        // which the ctor copies from data+0x18 (we passed 0). Data layout read
+        // from the ctor 0xa217a0: +0 int (id), +4 int manipulator kind
+        // (0x7f8480: 0 Chr, 1 Pad, 2 Network, 3 Replay, 5 NetAI), +8
+        // PlayerGameData, +0x10 optional, +0x18 object kept at +0x21f8, +0x20 int
+        // kept at +0x2260. Fill +0x18/+0x20 from the Hero's own values.
+        let obj21f8 = read_ptr(hero.unwrap_or(0) + 0x21f8);
+        let v2260 = read_checked::<u32>(hero.unwrap_or(0) + 0x2260);
+        let vt21f8 = obj21f8.and_then(|o| read_checked::<usize>(o)).map(|v| v.wrapping_sub(base));
+        let manip_vt = hero
+            .and_then(|h| read_ptr(h + 0x58))
+            .and_then(|m| read_checked::<usize>(m))
+            .map(|v| v.wrapping_sub(base));
+        tracing::info!(
+            obj21f8 = ?obj21f8.map(|v| format!("{v:#x}")),
+            obj21f8_vtable_rva = ?vt21f8.map(|v| format!("{v:#x}")),
+            v2260 = ?v2260,
+            hero_manipulator_vtable_rva = ?manip_vt.map(|v| format!("{v:#x}")),
+            "net player: hero fields"
+        );
+        let Some(obj21f8) = obj21f8 else {
+            tracing::warn!("net player: Hero+0x21f8 is null, not creating");
+            return;
+        };
+        let kind = std::env::var("SEKIRO_COOP_NET_PLAYER_KIND").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         let ptr = {
             let mut d = NET_PLAYER_DATA.lock();
-            d[0] = 1; // id
+            d[0] = 1 | (kind << 32); // id 1, manipulator kind
             d[1] = pgd as u64;
+            d[2] = 0;
+            d[3] = obj21f8 as u64;
+            d[4] = v2260.unwrap_or(0) as u64;
             d.as_ptr()
         };
         let create: CreateNetPlayerFn = core::mem::transmute(f);
