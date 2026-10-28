@@ -2055,6 +2055,24 @@ static DP_SMOOTH_MS: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_SMOOTH_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(33.0)
 });
 static DP_SMOOTH_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// The NetworkManipulator moves toward a packet at delta / (T * 1.2), i.e. 20%
+/// slower than the sender, so the clone falls behind until the snap rule
+/// fires. `SEKIRO_COOP_DP_LEAD=1.2` hands it target' = pos + lead * (target - pos)
+/// (pos = the clone's physics position when the packet is read), cancelling
+/// the damping. Default 1.0 = off.
+static DP_LEAD: Lazy<f32> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_LEAD").ok().and_then(|v| v.parse().ok()).filter(|v: &f32| *v >= 1.0 && *v <= 2.0).unwrap_or(1.0)
+});
+/// `SEKIRO_COOP_DP_TRACE=1`: 15 s after the clone appears, record 8 s of
+/// per-tick samples (clone pos, NetworkManipulator target/velocity/stick/
+/// snap flag/T) and log them, to see what each jump coincides with.
+static DP_TRACE: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_TRACE").map(|v| v == "1").unwrap_or(false)
+});
+static DP_TRACE_BUF: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static DP_TRACE_START: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static DP_TRACE_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DP_PKT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn dp_pos_of(b: &[u8]) -> Option<[f32; 3]> {
     if b.len() < DP_POS_OFF + 12 {
@@ -2149,6 +2167,13 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
         i.and_then(|i| q.remove(i)).map(|(_, _, b)| b)
     };
     let pkt = if ty == 1 && *DP_SMOOTH { dp_smooth_next(pkt, now) } else { pkt };
+    let pkt = match pkt {
+        Some(p) if ty == 1 && *DP_LEAD > 1.0 => Some(dp_lead(p)),
+        other => other,
+    };
+    if ty == 1 && pkt.is_some() {
+        DP_PKT_SEQ.fetch_add(1, Ordering::Relaxed);
+    }
     if let Some(p) = pkt {
         if !dbuf.is_null() && p.len() <= cap {
             core::ptr::copy_nonoverlapping(p.as_ptr(), dbuf, p.len());
@@ -2163,6 +2188,15 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
         }
     }
     out
+}
+
+fn dp_lead(p: Vec<u8>) -> Vec<u8> {
+    let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+    let Some(t) = dp_pos_of(&p) else { return p };
+    let cur = unsafe { phys_pos_addr(clone).and_then(|a| read_checked::<[f32; 3]>(a)) };
+    let Some(c) = cur.filter(|c| dist(*c, t) < 10.0) else { return p };
+    let k = *DP_LEAD;
+    dp_with_pos(&p, [c[0] + (t[0] - c[0]) * k, c[1] + (t[1] - c[1]) * k, c[2] + (t[2] - c[2]) * k])
 }
 
 /// Smoothing for type 1: remember the last two real packets; every update give
@@ -2296,6 +2330,41 @@ fn dp_session_step() {
                     mx.1 = mx.1.max(dist(hp, cp));
                 }
                 *last = Some(cp);
+            }
+        }
+    }
+    if *DP_TRACE && !DP_TRACE_DONE.load(Ordering::Relaxed) {
+        let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+        if clone != 0 {
+            let mut st = DP_TRACE_START.lock();
+            let t0 = *st.get_or_insert_with(std::time::Instant::now);
+            let el = t0.elapsed().as_secs_f32();
+            if el >= 15.0 && el < 23.0 {
+                unsafe {
+                    let m = read_ptr(clone + 0x58).unwrap_or(0);
+                    let f3 = |a: usize| read_checked::<[f32; 3]>(a).map(|v| format!("{:.2},{:.2},{:.2}", v[0], v[1], v[2])).unwrap_or_default();
+                    let line = format!(
+                        "{:.3} seq={} pos={} tgt={} vel={} stick={} snap={} T={:.3} hero={}",
+                        el,
+                        DP_PKT_SEQ.load(Ordering::Relaxed),
+                        f3(phys_pos_addr(clone).unwrap_or(0)),
+                        f3(m + 0x360),
+                        f3(m + 0x380),
+                        f3(m + 0x10),
+                        read_checked::<u8>(m + 0x350).unwrap_or(9),
+                        read_checked::<f32>(m + 0x3cc).unwrap_or(-1.0),
+                        hero_pos().map(|v| format!("{:.2},{:.2},{:.2}", v[0], v[1], v[2])).unwrap_or_default(),
+                    );
+                    DP_TRACE_BUF.lock().push(line);
+                }
+            } else if el >= 23.0 {
+                DP_TRACE_DONE.store(true, Ordering::Relaxed);
+                let buf = std::mem::take(&mut *DP_TRACE_BUF.lock());
+                tracing::info!(samples = buf.len(), "dp trace: begin");
+                for l in buf {
+                    tracing::info!("dp trace {l}");
+                }
+                tracing::info!("dp trace: end");
             }
         }
     }
