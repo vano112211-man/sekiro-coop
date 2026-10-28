@@ -1232,6 +1232,33 @@ fn spawn_player_step() {
             char_id = ?char_id,
             "net player: created"
         );
+        // Run 35: the PlayerIns turned but never animated. The game's own net
+        // path (0xa7a840) does more after 0xa49460: `0x9f5170(chr, id)` (stores
+        // the chr type at ChrIns+0x70, then 0x9f64d0) and `chr->vt[+0x90]()`
+        // (PlayerIns: 0xa23790). Do the same, byte/slot-checked.
+        if chr != 0 {
+            let f_type = base + 0x9f5170;
+            let type_ok = readable(f_type, 8)
+                && core::slice::from_raw_parts(f_type as *const u8, 8) == [0x48, 0x83, 0xec, 0x28, 0x89, 0x51, 0x70, 0xe8];
+            let chr_type: u32 = std::env::var("SEKIRO_COOP_NET_PLAYER_TYPE").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+            if type_ok {
+                let set_type: unsafe extern "system" fn(usize, u32) = core::mem::transmute(f_type);
+                set_type(chr, chr_type);
+            }
+            let vt90 = read_ptr(chr).and_then(|v| read_checked::<usize>(v + 0x90));
+            let vt90_ok = vt90 == Some(base + 0xa23790);
+            if vt90_ok {
+                let init: unsafe extern "system" fn(usize) = core::mem::transmute(base + 0xa23790);
+                init(chr);
+            }
+            tracing::info!(
+                type_ok,
+                chr_type,
+                vt90_ok,
+                chr_type_now = ?read_checked::<u32>(chr + 0x70),
+                "net player: post-create steps"
+            );
+        }
         if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
             *TARGET.lock() = Some(Target { handle, ptr: chr, char_id });
             *LAST_WRITTEN.lock() = None;
