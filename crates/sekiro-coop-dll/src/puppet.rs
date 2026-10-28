@@ -2468,7 +2468,11 @@ fn spawn_player_step() {
                 vtcount_install(h, chr);
             }
         }
-        if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
+        // Run 63: in DP mode the game drives the clone; the old puppet code
+        // (animation reset every 2 s, warps) fought it and made it jump.
+        if *DP_SESSION && chr != 0 {
+            tracing::info!("dp session: clone left to the game (no puppet pin, no resets, no warps)");
+        } else if let (true, Some(handle), Some(char_id)) = (chr != 0, handle, char_id) {
             *TARGET.lock() = Some(Target { handle, ptr: chr, char_id });
             *LAST_WRITTEN.lock() = None;
             *PIN_TIME.lock() = Some(std::time::Instant::now());
