@@ -34,4 +34,4 @@ Saves
 If something goes wrong
   Send the file sekiro-coop.log from this folder.
 
-Not included: no game files. Source: sekiro-coop (AGPL-3.0-or-later), based on mstampfli/sekiro-coop. Under the AGPL, whoever shares this build must also offer its source code.
+Not included: no game files. Source: sekiro-coop (AGPL-3.0-or-later), based on mstampfli/sekiro-coop; this build: https://github.com/vano112211-man/sekiro-coop/tree/coop/puppet-probe Under the AGPL, whoever shares this build must also offer its source code.
