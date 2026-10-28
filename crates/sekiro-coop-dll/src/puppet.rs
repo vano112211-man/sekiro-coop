@@ -813,6 +813,16 @@ fn write_step(from_ticker: bool) {
         if *INPUT_COPY {
             input_copy(t.ptr);
             if *NO_POS {
+                // Put it beside the Hero once, then leave movement to the input.
+                let mut lw = LAST_WRITTEN.lock();
+                if lw.is_none() {
+                    let pos = [hero[0] + 2.0, hero[1], hero[2]];
+                    if let Some(r) = rot_of(t.ptr) {
+                        if native_warp(t.ptr, pos, r) {
+                            *lw = Some(pos);
+                        }
+                    }
+                }
                 return;
             }
         }
