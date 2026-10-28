@@ -836,6 +836,14 @@ fn write_step(from_ticker: bool) {
                     .lock()
                     .map(|w| w.elapsed() >= std::time::Duration::from_millis(250))
                     .unwrap_or(true);
+                // Run 41: warps every ~1.3 s read as teleports. Nudge the
+                // position a little each step instead, warp only when far off.
+                if off_by > 0.3 && off_by <= *CORRECT_M && (cur[1] - r[1]).abs() <= 3.0 {
+                    let k = 0.04;
+                    let np = [cur[0] + (r[0] - cur[0]) * k, cur[1], cur[2] + (r[2] - cur[2]) * k];
+                    RawPtr(p).write::<[f32; 3]>(np);
+                    NUDGES.fetch_add(1, Ordering::Relaxed);
+                }
                 if (off_by > *CORRECT_M || (cur[1] - r[1]).abs() > 3.0) && due {
                     if let Some(rot) = rot_of(t.ptr) {
                         if native_warp(t.ptr, r, rot) {
@@ -1137,6 +1145,7 @@ static CORRECT_M: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_PUPPET_CORRECT_M").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5)
 });
 static CORRECTIONS: AtomicU64 = AtomicU64::new(0);
+static NUDGES: AtomicU64 = AtomicU64::new(0);
 static INPUT_LOGGED: AtomicU64 = AtomicU64::new(0);
 const MANIP_COPY_FROM: usize = 0x10;
 const MANIP_COPY_TO: usize = 0x300;
@@ -2015,6 +2024,8 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         remote_manip_used = REMOTE_MANIP_USED.load(Ordering::Relaxed),
         clone_upd_calls = CLONE_UPD_CALLS.load(Ordering::Relaxed),
         corrections = CORRECTIONS.load(Ordering::Relaxed),
+        nudges = NUDGES.load(Ordering::Relaxed),
+        clone_off_by = ?t.and_then(|t| unsafe { phys_pos_addr(t.ptr).map(|p| RawPtr(p).read::<[f32; 3]>()) }).zip(remote_target()).map(|(a, b)| dist([a[0], 0.0, a[2]], [b[0], 0.0, b[2]])),
         action_anim = *ACTION_ANIM,
         forces = FORCES.load(Ordering::Relaxed),
         force_refused = FORCE_REFUSED.load(Ordering::Relaxed),
