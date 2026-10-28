@@ -1982,6 +1982,10 @@ static DP_DELAY: Lazy<std::time::Duration> = Lazy::new(|| {
 });
 const RVA_SESSION_HOLDER_VT: usize = 0x2b862f8;
 const RVA_NULL_SESSION_VT: usize = 0x2b86308;
+/// Run 59: both the Hero and the clone hold PlayerDebugSession, a local loopback
+/// queue (manager at 0x3d93618, 32-entry ring) the developers used to test remote
+/// players on one machine. Its slots 0/1/6 are replaced like the Null ones.
+const RVA_DEBUG_SESSION_VT: usize = 0x2b86048;
 const DP_MAX: usize = 0x400;
 
 /// A fake PlayerSession: vtable pointer, then a tag so logs can tell them apart.
@@ -2071,11 +2075,11 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
     out
 }
 
-/// Build a fake session: a copy of the Null session's 12-slot vtable with
+/// Build a fake session: a copy of the Debug session's 12-slot vtable with
 /// [0] dtor, [1] Send, [6] Receive replaced.
 unsafe fn dp_make_session(tag: usize) -> Option<usize> {
     let base = MODULE_BASE.load(Ordering::Relaxed);
-    let null_vt = base + RVA_NULL_SESSION_VT;
+    let null_vt = base + RVA_DEBUG_SESSION_VT;
     if !readable(null_vt, 12 * 8) {
         return None;
     }
@@ -2097,7 +2101,9 @@ unsafe fn dp_swap_session(chr: usize, session: usize, who: &str) -> bool {
     let cur = read_ptr(holder + 0x18);
     let cur_vt = cur.and_then(|c| read_checked::<usize>(c));
     let ok = holder_vt == Some(base + RVA_SESSION_HOLDER_VT)
-        && (cur_vt == Some(base + RVA_NULL_SESSION_VT) || cur == Some(session));
+        && (cur_vt == Some(base + RVA_NULL_SESSION_VT)
+            || cur_vt == Some(base + RVA_DEBUG_SESSION_VT)
+            || cur == Some(session));
     tracing::info!(
         who,
         chr = format!("{chr:#x}"),
@@ -2125,11 +2131,11 @@ fn dp_session_step() {
                 if *s == 0 {
                     *s = dp_make_session(0x4845_524f).unwrap_or(0); // "HERO"
                 }
-                if *s != 0 && dp_swap_session(hero, *s, "hero") {
-                    DP_HERO_ATTACHED.store(hero, Ordering::Relaxed);
-                } else {
-                    DP_HERO_ATTACHED.store(hero, Ordering::Relaxed); // don't retry every tick
+                // Once per Hero pointer, success or not (no retry every tick).
+                if *s != 0 {
+                    dp_swap_session(hero, *s, "hero");
                 }
+                DP_HERO_ATTACHED.store(hero, Ordering::Relaxed);
             }
         }
     }
