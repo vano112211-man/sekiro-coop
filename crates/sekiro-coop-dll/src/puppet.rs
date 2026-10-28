@@ -1397,7 +1397,12 @@ unsafe fn clone_pad_install(chr: usize) {
     for i in 0..64 {
         vt[i] = RawPtr(src_vt + i * 8).read::<usize>();
     }
-    vt[0] = clone_pad_update as usize;
+    // Slot 0 looks like the pad-device getter (run 40: never reached our
+    // copy). Overriding it may leave the clone without a device, which may be
+    // why it stopped walking (runs 41-44). SEKIRO_COOP_CLONE_SLOT0=0 keeps it.
+    if std::env::var("SEKIRO_COOP_CLONE_SLOT0").map(|v| v != "0").unwrap_or(true) {
+        vt[0] = clone_pad_update as usize;
+    }
     PAD_UPD48.store(vt[0x48 / 8], Ordering::Relaxed);
     PAD_UPD50.store(vt[0x50 / 8], Ordering::Relaxed);
     if vt[0x48 / 8] != base + 0x7ef120 || vt[0x50 / 8] != base + 0x7ef300 {
