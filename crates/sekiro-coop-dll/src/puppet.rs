@@ -1980,6 +1980,15 @@ static DP_DELAY: Lazy<std::time::Duration> = Lazy::new(|| {
         std::env::var("SEKIRO_COOP_DP_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000),
     )
 });
+/// Run 62: the clone animates but lags and jumps. The Hero sends type 1 about
+/// 15/s: PadManipulator vt[11] counts +0x360 down and sends at <= 0, then
+/// reloads it from 0x96f8a0(5). `SEKIRO_COOP_DP_SEND_EVERY_FRAME=1` keeps the
+/// counter at 0 so it sends every update.
+static DP_EVERY_FRAME: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_SEND_EVERY_FRAME").map(|v| v == "1").unwrap_or(false)
+});
+static DP_CLONE_LAST: Mutex<Option<[f32; 3]>> = Mutex::new(None);
+static DP_CLONE_MAXSTEP: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0)); // (max step, max dist) since last log
 const RVA_SESSION_HOLDER_VT: usize = 0x2b862f8;
 const RVA_NULL_SESSION_VT: usize = 0x2b86308;
 /// Run 59: both the Hero and the clone hold PlayerDebugSession, a local loopback
@@ -2159,9 +2168,43 @@ fn dp_session_step() {
             }
         }
     }
+    unsafe {
+        let base = MODULE_BASE.load(Ordering::Relaxed);
+        if *DP_EVERY_FRAME {
+            if let Some(m) = hero_chr().and_then(|h| read_ptr(h + 0x58)) {
+                if read_checked::<usize>(m) == Some(base + RVA_PAD_MANIP_VT) {
+                    RawPtr(m + 0x360).write::<i32>(0);
+                }
+            }
+        }
+        let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+        if clone != 0 {
+            let cp = phys_pos_addr(clone).and_then(|a| read_checked::<[f32; 3]>(a));
+            if let Some(cp) = cp {
+                let mut last = DP_CLONE_LAST.lock();
+                let mut mx = DP_CLONE_MAXSTEP.lock();
+                if let Some(lp) = *last {
+                    mx.0 = mx.0.max(dist(lp, cp));
+                }
+                if let Some(hp) = hero_pos() {
+                    mx.1 = mx.1.max(dist(hp, cp));
+                }
+                *last = Some(cp);
+            }
+        }
+    }
     let mut l = DP_LAST_LOG.lock();
     if l.map(|t| t.elapsed() >= std::time::Duration::from_secs(2)).unwrap_or(true) {
         *l = Some(std::time::Instant::now());
+        let (step, far) = std::mem::take(&mut *DP_CLONE_MAXSTEP.lock());
+        let clone_pos = *DP_CLONE_LAST.lock();
+        tracing::info!(
+            max_step_m = step,
+            max_dist_to_hero_m = far,
+            clone_pos = ?clone_pos,
+            hero_pos = ?hero_pos(),
+            "dp session: clone motion (per tick step, distance) over 2 s"
+        );
         tracing::info!(
             sends = DP_SENDS.load(Ordering::Relaxed),
             send_types = ?*DP_SEND_TYPES.lock(),

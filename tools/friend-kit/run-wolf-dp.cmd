@@ -1,5 +1,6 @@
 @echo off
 rem Wolf clone driven by the game's own remote-player packets (DP_REGULAR via a fake PlayerSession).
+rem Argument 1 = send the Hero's packets every frame (default: the game's ~15/s).
 rem The simulator mirrors the Hero's packets back with a delay; the clone is a kind-2 (Network) PlayerIns.
 rem Uses the test copy and the separate save coop-test.sl2. Optional argument: warp interval in ms.
 setlocal
@@ -21,7 +22,7 @@ rem Stop any simulator left from an earlier run, then start a fresh one with a f
 taskkill /F /IM peer-simulator.exe >nul 2>&1
 ping -n 2 127.0.0.1 >nul
 del "%RUN%\peer.log" "%RUN%\peer.err" "%RUN%\sekiro-coop.log" 2>nul
-start "peer-simulator" /MIN cmd /c ""%BUILD%\peer-simulator.exe" --bind 127.0.0.1:28001 --peer 127.0.0.1:28000 --as client --mirror --mirror-offset 5 > "%RUN%\peer.log" 2> "%RUN%\peer.err""
+start "peer-simulator" /MIN cmd /c ""%BUILD%\peer-simulator.exe" --bind 127.0.0.1:28001 --peer 127.0.0.1:28000 --as client --mirror --mirror-delay-ms 250 --mirror-offset 5 > "%RUN%\peer.log" 2> "%RUN%\peer.err""
 ping -n 3 127.0.0.1 >nul
 tasklist /FI "IMAGENAME eq peer-simulator.exe" | find /I "peer-simulator.exe" >nul
 if errorlevel 1 (
@@ -84,6 +85,7 @@ set SEKIRO_COOP_VTCOUNT=
 set SEKIRO_COOP_DP_PROBE=
 set SEKIRO_COOP_DP_SESSION=1
 set SEKIRO_COOP_DP_LOOPBACK=
+set SEKIRO_COOP_DP_SEND_EVERY_FRAME=%~1
 set SEKIRO_COOP_CLONE_PATCH=
 set SEKIRO_COOP_PUPPET_PHASES=
 if not "%~1"=="" if not "%~1"=="-" set SEKIRO_COOP_PUPPET_WARP_MS=%~1
