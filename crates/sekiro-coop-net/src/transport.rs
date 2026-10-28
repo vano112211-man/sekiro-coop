@@ -16,6 +16,8 @@ pub enum TransportError {
     NoPeer,
     #[error("timeout")]
     Timeout,
+    #[error("transport unavailable: {0}")]
+    Unavailable(String),
 }
 
 pub trait Transport: Send {
@@ -29,6 +31,21 @@ pub trait Transport: Send {
     fn set_peer(&mut self, peer: SocketAddr) -> Result<(), TransportError>;
 
     fn local_addr(&self) -> Result<SocketAddr, TransportError>;
+}
+
+impl Transport for Box<dyn Transport> {
+    fn send(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        (**self).send(bytes)
+    }
+    fn recv(&mut self, buf: &mut [u8]) -> Result<Option<usize>, TransportError> {
+        (**self).recv(buf)
+    }
+    fn set_peer(&mut self, peer: SocketAddr) -> Result<(), TransportError> {
+        (**self).set_peer(peer)
+    }
+    fn local_addr(&self) -> Result<SocketAddr, TransportError> {
+        (**self).local_addr()
+    }
 }
 
 /// Datagram-based transport using `std::net::UdpSocket`.

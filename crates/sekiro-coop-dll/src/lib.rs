@@ -64,7 +64,7 @@ pub struct Mod {
     pub match_seed: Mutex<MatchSeed>,
     pub frame: std::sync::atomic::AtomicU64,
 
-    pub session: Mutex<Option<Session<UdpTransport>>>,
+    pub session: Mutex<Option<Session<Box<dyn Transport>>>>,
     pub remote_player: Mutex<Option<PlayerSnapshot>>,
 
     /// Set once after the first successful `WorldChrMan` scan so we
@@ -287,7 +287,7 @@ pub fn on_attach() -> anyhow::Result<()> {
     // Spawn on a retry thread because the peer may not be up yet and
     // the handshake blocks with a 5 s timeout.  Retrying in the
     // background means launch order (host vs peer-sim) doesn't matter.
-    if std::env::var("SEKIRO_COOP_BIND").is_ok() {
+    if std::env::var("SEKIRO_COOP_BIND").is_ok() || steam_transport_requested() {
         std::thread::Builder::new()
             .name("sekiro-coop-session-init".into())
             .spawn(move || {
@@ -324,10 +324,39 @@ pub fn on_detach() {
     hook::remove_all();
 }
 
-fn start_session_from_env(m: &'static Mod) -> anyhow::Result<()> {
-    // If we've already got a live session, don't redo the handshake.
-    if m.session.lock().is_some() {
-        anyhow::bail!("session already live");
+fn steam_transport_requested() -> bool {
+    std::env::var("SEKIRO_COOP_TRANSPORT").map(|v| v.eq_ignore_ascii_case("steam")).unwrap_or(false)
+}
+
+/// `SEKIRO_COOP_TRANSPORT=steam` + `SEKIRO_COOP_STEAM_PEER=<SteamID64>` uses
+/// Steam P2P through the game's own Steam API (no IPs, no port forwarding).
+/// Otherwise raw UDP from `SEKIRO_COOP_BIND` / `SEKIRO_COOP_PEER_ADDR`.
+fn make_transport_from_env() -> anyhow::Result<(Box<dyn Transport>, Lobby)> {
+    if steam_transport_requested() {
+        #[cfg(windows)]
+        {
+            let own = sekiro_coop_net::steam::imp::own_steam_id();
+            let peer: u64 = match std::env::var("SEKIRO_COOP_STEAM_PEER").ok().filter(|v| !v.trim().is_empty()) {
+                Some(v) => v.trim().parse()?,
+                None => {
+                    // Solo smoke test: prove the game's Steam API answers.
+                    static SOLO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if own.is_some() && !SOLO.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        tracing::info!(own = ?own, "steam: no SEKIRO_COOP_STEAM_PEER; this is your SteamID64 for your friend");
+                    }
+                    anyhow::bail!("SEKIRO_COOP_STEAM_PEER (friend's SteamID64) not set; own id {own:?}");
+                }
+            };
+            let t = sekiro_coop_net::steam::imp::SteamTransport::new(peer)?;
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(own = t.own_steam_id(), peer, "steam transport ready (give your own id to your friend)");
+            }
+            let placeholder: SocketAddr = "0.0.0.0:0".parse()?;
+            return Ok((Box::new(t), Lobby::direct_udp(placeholder, 0)));
+        }
+        #[cfg(not(windows))]
+        anyhow::bail!("steam transport needs Windows");
     }
     let bind = std::env::var("SEKIRO_COOP_BIND")?;
     let peer_addr = std::env::var("SEKIRO_COOP_PEER_ADDR")?;
@@ -335,7 +364,15 @@ fn start_session_from_env(m: &'static Mod) -> anyhow::Result<()> {
     let peer_addr: SocketAddr = peer_addr.parse()?;
     let mut t = UdpTransport::bind(bind_addr)?;
     t.set_peer(peer_addr)?;
-    let lobby = Lobby::direct_udp(peer_addr, 0);
+    Ok((Box::new(t), Lobby::direct_udp(peer_addr, 0)))
+}
+
+fn start_session_from_env(m: &'static Mod) -> anyhow::Result<()> {
+    // If we've already got a live session, don't redo the handshake.
+    if m.session.lock().is_some() {
+        anyhow::bail!("session already live");
+    }
+    let (t, lobby) = make_transport_from_env()?;
     let cfg = SessionConfig {
         peer: m.authority.peer,
         ..Default::default()

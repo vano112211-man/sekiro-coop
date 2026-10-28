@@ -22,7 +22,7 @@ hudhook = { version = "0.8", optional = true }
 sekiro-sdk-bridge = { workspace = true }
 sekiro-coop-rollback = { workspace = true }
 sekiro-coop-authority = { workspace = true }
-sekiro-coop-net = { workspace = true }
+sekiro-coop-net = { workspace = true, features = ["steam"] }
 anyhow = { workspace = true }
 parking_lot = { workspace = true }
 once_cell = { workspace = true }
