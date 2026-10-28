@@ -1476,6 +1476,29 @@ fn clone_diff_step() {
         tracing::info!(lines = ?chunk, "clone diff");
     }
     tracing::info!(total = out.len(), "clone diff done");
+    // Run 48: copy chosen u32 fields Hero → clone once, to find the one that
+    // gates walking. `SEKIRO_COOP_CLONE_PATCH=chr:0x78,chr:0x128,ctrl:0x8,...`
+    if let Ok(spec) = std::env::var("SEKIRO_COOP_CLONE_PATCH") {
+        for item in spec.split(',').filter(|x| !x.is_empty()) {
+            let Some((region, off)) = item.split_once(':') else { continue };
+            let Ok(off) = usize::from_str_radix(off.trim_start_matches("0x"), 16) else { continue };
+            unsafe {
+                let (a, b) = match region {
+                    "chr" => (Some(hero), Some(clone)),
+                    "ctrl" => (read_ptr(hero + 0x50), read_ptr(clone + 0x50)),
+                    _ => (None, None),
+                };
+                if let (Some(a), Some(b)) = (a, b) {
+                    if readable(a + off, 4) && readable(b + off, 4) {
+                        let v: u32 = RawPtr(a + off).read();
+                        let old: u32 = RawPtr(b + off).read();
+                        RawPtr(b + off).write::<u32>(v);
+                        tracing::info!(region, off = format!("{off:#x}"), old = format!("{old:#x}"), new = format!("{v:#x}"), "clone patch");
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- net player
