@@ -1288,14 +1288,26 @@ static PAD_UPD50: AtomicUsize = AtomicUsize::new(0);
 static CLONE_UPD_CALLS: AtomicU64 = AtomicU64::new(0);
 type PadUpdFn = unsafe extern "system" fn(usize, f32, usize, usize) -> usize;
 
+/// Which copy ranges to apply on the clone: all (default), "base" (ChrManipulator
+/// part only, < 0x340), or "none" (let the clone's own pad update stand).
+static CLONE_RANGES: Lazy<String> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_CLONE_RANGES").unwrap_or_else(|_| "all".into())
+});
+
 unsafe fn clone_apply_state(this: usize) {
+    if CLONE_RANGES.as_str() == "none" {
+        return;
+    }
+    let base_only = CLONE_RANGES.as_str() == "base";
     if *SOURCE_NET {
         let g = REMOTE_MANIP.lock();
         if let Some((b, at)) = g.as_ref() {
             if at.elapsed() < std::time::Duration::from_millis(500) {
                 let mut off = 0;
                 for (a, e) in PAD_COPY_RANGES {
-                    core::ptr::copy_nonoverlapping(b.as_ptr().add(off), (this + a) as *mut u8, e - a);
+                    if !(base_only && a >= 0x340) {
+                        core::ptr::copy_nonoverlapping(b.as_ptr().add(off), (this + a) as *mut u8, e - a);
+                    }
                     off += e - a;
                 }
                 REMOTE_MANIP_USED.fetch_add(1, Ordering::Relaxed);
