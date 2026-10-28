@@ -813,6 +813,7 @@ fn write_step(from_ticker: bool) {
         if *INPUT_COPY {
             input_copy(t.ptr);
         }
+        dp_probe_step();
         // Run 56: the clone is updated rarely. Script command
         // ChrCmd_ForceSetOmissionLevel (EventChrEntity vt+0x1e0 = 0x74fae0) sets
         // bit 0 of ChrIns+0x1a10 (force) and ChrIns+0x110 (omission level, when
@@ -1942,6 +1943,68 @@ fn vtcount_report() {
         }
     }
     *last = Some((h, c));
+}
+
+// ---------------------------------------------------------------- DP_REGULAR probe
+
+/// Run 58: the game's remote-player pipeline. PadManipulator+0x350 and
+/// NetworkManipulator+0x340 are sync objects (base init 0x8d3c60) holding three
+/// packet lists: +0x0 tag_DP_REGULAR_NORMAL, +0x98 tag_DP_REGULAR, +0x138
+/// tag_DP_REGULAR_REPLAY_GHOST (CSPacketInheritList: vt[0] Serialize(list,
+/// &{buf, cap}) -> size (0x8d6560), vt[1] Deserialize(list, &ptr) -> size
+/// (0x8dcc50), vt[3] field count). Serialize the Hero's three packets once a
+/// second and log size and bytes, to see whether they carry live state.
+/// `SEKIRO_COOP_DP_PROBE=1`.
+static DP_PROBE: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_PROBE").map(|v| v == "1").unwrap_or(false)
+});
+static DP_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static DP_LOGS: AtomicU64 = AtomicU64::new(0);
+#[repr(C)]
+struct DpWriter {
+    buf: *mut u8,
+    cap: u32,
+}
+type DpSerializeFn = unsafe extern "system" fn(list: usize, w: *mut DpWriter) -> usize;
+
+unsafe fn dp_probe_step() {
+    if !*DP_PROBE || DP_LOGS.load(Ordering::Relaxed) >= 40 {
+        return;
+    }
+    {
+        let mut l = DP_LAST.lock();
+        if l.map(|t| t.elapsed() < std::time::Duration::from_secs(1)).unwrap_or(false) {
+            return;
+        }
+        *l = Some(std::time::Instant::now());
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let Some(hero) = hero_chr() else { return };
+    let Some(manip) = read_ptr(hero + 0x58) else { return };
+    if read_checked::<usize>(manip) != Some(base + RVA_PAD_MANIP_VT) {
+        return;
+    }
+    let Some(sync) = read_ptr(manip + 0x350) else { return };
+    let mut rows = Vec::new();
+    for (name, off) in [("NORMAL", 0usize), ("REGULAR", 0x98), ("GHOST", 0x138)] {
+        let list = sync + off;
+        let Some(vt) = read_ptr(list) else { continue };
+        let ser = read_checked::<usize>(vt);
+        let count = read_checked::<usize>(vt + 0x18);
+        if ser != Some(base + 0x8d6560) {
+            rows.push(format!("{name}: vt {:#x} slot0 {:?} (not 0x8d6560)", vt - base, ser.map(|v| format!("{:#x}", v.wrapping_sub(base)))));
+            continue;
+        }
+        let mut buf = vec![0u8; 0x1000];
+        let mut w = DpWriter { buf: buf.as_mut_ptr(), cap: buf.len() as u32 };
+        let f: DpSerializeFn = core::mem::transmute(base + 0x8d6560);
+        let n = f(list, &mut w);
+        let n = n.min(buf.len());
+        let hex: String = buf[..n.min(96)].iter().map(|b| format!("{b:02x}")).collect();
+        rows.push(format!("{name}: vt {:#x} countfn {:?} size {n} bytes {hex}", vt - base, count.map(|v| format!("{:#x}", v.wrapping_sub(base)))));
+    }
+    DP_LOGS.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(rows = ?rows, "dp probe: Hero packets");
 }
 
 // ---------------------------------------------------------------- net player
