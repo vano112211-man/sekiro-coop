@@ -2140,6 +2140,9 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
 /// the oldest due packet of the requested type only.
 unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const u64, ty: u32) -> *mut u64 {
     DP_RECV_CALLS.fetch_add(1, Ordering::Relaxed);
+    if ty == 1 {
+        bot_sample();
+    }
     dp_count(&DP_RECV_BY_TYPE, ty, 0);
     *out = 0;
     *out.add(1) = 0;
@@ -2510,6 +2513,200 @@ pub fn dp_note_remote(ty: u32, bytes: Vec<u8>) {
     while q.len() > 1200 {
         q.pop_front();
     }
+}
+
+// ---------------------------------------------------------------- test bot
+
+/// In-game test bot (coop-anything rule 11: test with bots, not people).
+/// `SEKIRO_COOP_BOT=1`: 5 s after the clone appears, drive the Hero for 60 s
+/// (run in a circle for 10 s, stand 2 s, repeat) by writing the move vector
+/// the manipulators use (PadManipulator +0x10 and +0xc0, world x/z, length
+/// 1.0 = run; same fields the NetworkManipulator's slot 41 writes) right after
+/// the Hero's own manipulator update (vtable copy, slots 0x48/0x50 wrapped).
+/// Meanwhile measure, once per game frame on the game thread, how far the
+/// clone and the Hero move, and log a summary and "bot: done".
+static BOT: Lazy<bool> = Lazy::new(|| std::env::var("SEKIRO_COOP_BOT").map(|v| v == "1").unwrap_or(false));
+static BOT_VT: Mutex<[usize; 64]> = Mutex::new([0; 64]);
+static BOT_MANIP: AtomicUsize = AtomicUsize::new(0);
+static BOT_ORIG48: AtomicUsize = AtomicUsize::new(0);
+static BOT_ORIG50: AtomicUsize = AtomicUsize::new(0);
+static BOT_START: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static BOT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const BOT_SECS: f32 = 60.0;
+/// Per-frame samples: (time, clone pos, hero pos).
+static BOT_SAMPLES: Mutex<Vec<(f32, [f32; 3], [f32; 3])>> = Mutex::new(Vec::new());
+static BOT_LAST_SAMPLE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn bot_elapsed() -> Option<f32> {
+    BOT_START.lock().map(|t| t.elapsed().as_secs_f32())
+}
+
+/// Move vector for time t (seconds into the run): None = stand still.
+fn bot_vector(t: f32) -> Option<[f32; 2]> {
+    if !(0.0..BOT_SECS).contains(&t) || t % 12.0 >= 10.0 {
+        return None;
+    }
+    let a = t * std::f32::consts::TAU / 6.0; // a full circle every 6 s
+    Some([a.sin(), a.cos()])
+}
+
+unsafe fn bot_write(this: usize) {
+    let Some(t) = bot_elapsed() else { return };
+    if let Some([x, z]) = bot_vector(t) {
+        let v: [f32; 4] = [x, 0.0, z, 0.0];
+        RawPtr(this + 0x10).write::<[f32; 4]>(v);
+        RawPtr(this + 0xc0).write::<[f32; 4]>(v);
+    }
+}
+
+unsafe extern "system" fn bot_upd48(this: usize, dt: f32, ctrl: usize, flag: usize) -> usize {
+    let orig: PadUpdFn = core::mem::transmute(BOT_ORIG48.load(Ordering::Relaxed));
+    let r = orig(this, dt, ctrl, flag);
+    bot_write(this);
+    r
+}
+
+unsafe extern "system" fn bot_upd50(this: usize, dt: f32, ctrl: usize, flag: usize) -> usize {
+    let orig: PadUpdFn = core::mem::transmute(BOT_ORIG50.load(Ordering::Relaxed));
+    let r = orig(this, dt, ctrl, flag);
+    bot_write(this);
+    r
+}
+
+/// Ticker: install on the Hero (again after a reload), start 5 s after the
+/// clone appears, and report at the end.
+fn bot_step() {
+    if !*BOT || BOT_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    unsafe {
+        let Some(hero) = hero_chr() else { return };
+        let Some(m) = read_ptr(hero + 0x58) else { return };
+        let mut vt = BOT_VT.lock();
+        if BOT_MANIP.load(Ordering::Relaxed) != m {
+            if read_checked::<usize>(m) != Some(base + RVA_PAD_MANIP_VT) || !readable(base + RVA_PAD_MANIP_VT, 64 * 8) {
+                return;
+            }
+            for i in 0..64 {
+                vt[i] = RawPtr(base + RVA_PAD_MANIP_VT + i * 8).read::<usize>();
+            }
+            if vt[9] != base + 0x7ef120 || vt[10] != base + 0x7ef300 {
+                tracing::warn!("bot: unexpected PadManipulator update slots, not installing");
+                BOT_DONE.store(true, Ordering::Relaxed);
+                return;
+            }
+            BOT_ORIG48.store(vt[9], Ordering::Relaxed);
+            BOT_ORIG50.store(vt[10], Ordering::Relaxed);
+            vt[9] = bot_upd48 as usize;
+            vt[10] = bot_upd50 as usize;
+            RawPtr(m).write::<usize>(vt.as_ptr() as usize);
+            BOT_MANIP.store(m, Ordering::Relaxed);
+            tracing::info!(manip = format!("{m:#x}"), "bot: installed on the Hero's manipulator");
+        }
+    }
+    let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+    {
+        let mut st = BOT_START.lock();
+        if st.is_none() {
+            if clone == 0 {
+                return;
+            }
+            // Start 5 s after the clone first appears.
+            static SEEN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+            let seen = *SEEN.lock().get_or_insert_with(std::time::Instant::now);
+            if seen.elapsed().as_secs_f32() < 5.0 {
+                return;
+            }
+            *st = Some(std::time::Instant::now());
+            tracing::info!("bot: start (60 s: run a circle 10 s, stand 2 s)");
+        }
+    }
+    if bot_elapsed().unwrap_or(0.0) >= BOT_SECS + 2.0 {
+        BOT_DONE.store(true, Ordering::Relaxed);
+        bot_report();
+    }
+}
+
+/// Game thread, from the clone's Receive: one sample per frame.
+fn bot_sample() {
+    if !*BOT || BOT_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(t) = bot_elapsed() else { return };
+    let now = std::time::Instant::now();
+    {
+        let mut last = BOT_LAST_SAMPLE.lock();
+        if last.map(|l| now.duration_since(l).as_secs_f32() < 0.008).unwrap_or(false) {
+            return; // same frame
+        }
+        *last = Some(now);
+    }
+    let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+    let c = unsafe { phys_pos_addr(clone).and_then(|a| read_checked::<[f32; 3]>(a)) };
+    if let (Some(c), Some(h)) = (c, hero_pos()) {
+        let mut v = BOT_SAMPLES.lock();
+        if v.len() < 20_000 {
+            v.push((t, c, h));
+        }
+    }
+}
+
+fn bot_stats(name: &str, steps: &[(f32, f32)]) -> String {
+    // steps: (dt, distance) per frame, only while moving
+    if steps.is_empty() {
+        return format!("{name}: no samples");
+    }
+    let mut sp: Vec<f32> = steps.iter().map(|(dt, d)| d / dt.max(0.001)).collect();
+    sp.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |p: f32| sp[((sp.len() - 1) as f32 * p) as usize];
+    let jumps = steps.iter().filter(|(_, d)| *d > 0.4).count();
+    // speed changes frame to frame: how uneven the motion is
+    let mut dv: Vec<f32> = steps
+        .windows(2)
+        .map(|w| (w[1].1 / w[1].0.max(0.001) - w[0].1 / w[0].0.max(0.001)).abs())
+        .collect();
+    dv.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let dq = |p: f32| if dv.is_empty() { 0.0 } else { dv[((dv.len() - 1) as f32 * p) as usize] };
+    format!(
+        "{name}: frames={} speed m/s p50={:.2} p95={:.2} max={:.2} jumps>0.4m={} speed-change p50={:.2} p95={:.2}",
+        steps.len(),
+        q(0.5),
+        q(0.95),
+        q(1.0),
+        jumps,
+        dq(0.5),
+        dq(0.95)
+    )
+}
+
+fn bot_report() {
+    let v = std::mem::take(&mut *BOT_SAMPLES.lock());
+    let mut cs = Vec::new();
+    let mut hs = Vec::new();
+    for w in v.windows(2) {
+        let dt = w[1].0 - w[0].0;
+        if dt <= 0.0 || dt > 0.1 {
+            continue;
+        }
+        // only frames inside a running phase (skip the 2 s stands)
+        if bot_vector(w[1].0).is_none() {
+            continue;
+        }
+        cs.push((dt, dist(w[0].1, w[1].1)));
+        hs.push((dt, dist(w[0].2, w[1].2)));
+    }
+    let mean_gap = if v.is_empty() { 0.0 } else { v.iter().map(|s| dist(s.1, s.2)).sum::<f32>() / v.len() as f32 };
+    tracing::info!(
+        samples = v.len(),
+        mean_clone_hero_gap_m = mean_gap,
+        smooth_ms = *DP_SMOOTH_MS,
+        buf_delay_ms = *DP_BUF_DELAY * 1000.0,
+        "bot: summary"
+    );
+    tracing::info!("bot: {}", bot_stats("hero ", &hs));
+    tracing::info!("bot: {}", bot_stats("clone", &cs));
+    tracing::info!("bot: done");
 }
 
 // ---------------------------------------------------------------- DP_REGULAR probe
@@ -3074,6 +3271,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         return;
     }
     dp_session_step();
+    bot_step();
     clone_diff_step();
     bvar_scan_step();
     let _ = TICKER_TID.set(format!("{:?}", std::thread::current().id()));
