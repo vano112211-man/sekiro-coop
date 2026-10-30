@@ -2063,7 +2063,7 @@ static DP_SMOOTH_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static DP_LEAD: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_LEAD").ok().and_then(|v| v.parse().ok()).filter(|v: &f32| *v >= 1.0 && *v <= 2.0).unwrap_or(1.0)
 });
-/// `SEKIRO_COOP_DP_TRACE=1`: 15 s after the clone appears, record 8 s of
+/// `SEKIRO_COOP_DP_TRACE=1`: 3 s after the clone appears, record 15 s of
 /// per-tick samples (clone pos, NetworkManipulator target/velocity/stick/
 /// snap flag/T) and log them, to see what each jump coincides with.
 static DP_TRACE: Lazy<bool> = Lazy::new(|| {
@@ -2339,7 +2339,7 @@ fn dp_session_step() {
             let mut st = DP_TRACE_START.lock();
             let t0 = *st.get_or_insert_with(std::time::Instant::now);
             let el = t0.elapsed().as_secs_f32();
-            if el >= 15.0 && el < 23.0 {
+            if el >= 3.0 && el < 18.0 {
                 unsafe {
                     let m = read_ptr(clone + 0x58).unwrap_or(0);
                     let f3 = |a: usize| read_checked::<[f32; 3]>(a).map(|v| format!("{:.2},{:.2},{:.2}", v[0], v[1], v[2])).unwrap_or_default();
@@ -2357,7 +2357,7 @@ fn dp_session_step() {
                     );
                     DP_TRACE_BUF.lock().push(line);
                 }
-            } else if el >= 23.0 {
+            } else if el >= 18.0 {
                 DP_TRACE_DONE.store(true, Ordering::Relaxed);
                 let buf = std::mem::take(&mut *DP_TRACE_BUF.lock());
                 tracing::info!(samples = buf.len(), "dp trace: begin");
