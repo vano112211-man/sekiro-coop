@@ -2573,6 +2573,64 @@ unsafe extern "system" fn bot_upd50(this: usize, dt: f32, ctrl: usize, flag: usi
     r
 }
 
+/// `SEKIRO_COOP_BOT_AUTOLOAD=1`: until the Hero exists, press Enter / E every
+/// 1.5 s while the game window is in front, so the title screen and
+/// "Continue" go by without a person (the mod runs inside the game, so this
+/// is the game's own window receiving the keys). Stops for good once a Hero
+/// has been seen.
+static BOT_AUTOLOAD: Lazy<bool> = Lazy::new(|| std::env::var("SEKIRO_COOP_BOT_AUTOLOAD").map(|v| v == "1").unwrap_or(false));
+static BOT_AUTOLOAD_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BOT_AUTOLOAD_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static BOT_AUTOLOAD_T0: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static BOT_AUTOLOAD_N: AtomicU64 = AtomicU64::new(0);
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn keybd_event(vk: u8, scan: u8, flags: u32, extra: usize);
+    fn GetForegroundWindow() -> isize;
+    fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+}
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcessId() -> u32;
+}
+
+#[cfg(windows)]
+fn bot_autoload_step() {
+    if !*BOT_AUTOLOAD || BOT_AUTOLOAD_STOP.load(Ordering::Relaxed) {
+        return;
+    }
+    if hero_chr().is_some() && hero_pos().is_some() {
+        BOT_AUTOLOAD_STOP.store(true, Ordering::Relaxed);
+        tracing::info!(presses = BOT_AUTOLOAD_N.load(Ordering::Relaxed), "bot: in game, autoload stops");
+        return;
+    }
+    let t0 = *BOT_AUTOLOAD_T0.lock().get_or_insert_with(std::time::Instant::now);
+    if t0.elapsed().as_secs_f32() < 12.0 || t0.elapsed().as_secs_f32() > 180.0 {
+        return; // let the intro start; give up after 3 minutes
+    }
+    let mut last = BOT_AUTOLOAD_LAST.lock();
+    if last.map(|t| t.elapsed().as_secs_f32() < 1.5).unwrap_or(false) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+        if pid != GetCurrentProcessId() {
+            return;
+        }
+        let n = BOT_AUTOLOAD_N.fetch_add(1, Ordering::Relaxed);
+        let (vk, sc) = if n % 2 == 0 { (0x0Du8, 0x1Cu8) } else { (0x45u8, 0x12u8) }; // Enter, E
+        keybd_event(vk, sc, 0, 0);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        keybd_event(vk, sc, 2, 0); // KEYEVENTF_KEYUP
+    }
+}
+#[cfg(not(windows))]
+fn bot_autoload_step() {}
+
 /// Ticker: install on the Hero (again after a reload), start 5 s after the
 /// clone appears, and report at the end.
 fn bot_step() {
@@ -3271,6 +3329,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         return;
     }
     dp_session_step();
+    bot_autoload_step();
     bot_step();
     clone_diff_step();
     bvar_scan_step();
