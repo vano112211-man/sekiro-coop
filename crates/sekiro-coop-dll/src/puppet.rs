@@ -2199,26 +2199,29 @@ fn dp_lead(p: Vec<u8>) -> Vec<u8> {
     dp_with_pos(&p, [c[0] + (t[0] - c[0]) * k, c[1] + (t[1] - c[1]) * k, c[2] + (t[2] - c[2]) * k])
 }
 
-/// Smoothing for type 1: remember the last two real packets; every update give
-/// the latest one with its position moved along from the previous one.
+/// Smoothing for type 1 (run 70 trace: the clone's x/z sit exactly on the
+/// NetworkManipulator target every sample, so the clone is only as smooth as
+/// the target stream). A small jitter buffer: real packets are stored with
+/// their arrival time; every `SEKIRO_COOP_DP_SMOOTH_MS` the clone gets the
+/// newest packet with its position interpolated at now - `SEKIRO_COOP_DP_DELAY_BUF_MS`
+/// (120) between the two stored packets around that time (held at the newest
+/// one if the buffer runs dry). The packet's own height is kept.
+static DP_HIST: Mutex<std::collections::VecDeque<(std::time::Instant, [f32; 3])>> =
+    Mutex::new(std::collections::VecDeque::new());
+static DP_BUF_DELAY: Lazy<f32> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_DELAY_BUF_MS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(120.0) / 1000.0
+});
+static DP_SMOOTH_HELD: AtomicU64 = AtomicU64::new(0);
+
 fn dp_smooth_next(real: Option<Vec<u8>>, now: std::time::Instant) -> Option<Vec<u8>> {
-    let mut cur = DP_SMOOTH_CUR.lock();
-    let mut prev = DP_SMOOTH_PREV.lock();
     if let Some(r) = real {
-        if dp_pos_of(&r).is_none() {
-            return Some(r);
+        let Some(p) = dp_pos_of(&r) else { return Some(r) };
+        let mut h = DP_HIST.lock();
+        h.push_back((now, p));
+        while h.len() > 32 {
+            h.pop_front();
         }
-        if let Some((t, b)) = cur.take() {
-            *prev = dp_pos_of(&b).map(|p| (t, p));
-        }
-        *cur = Some((now, r.clone()));
-        *DP_SMOOTH_LAST.lock() = Some(now);
-        // The real packet goes out with the previous position (start of the
-        // segment): the clone then walks to it over the next interval.
-        return Some(match *prev {
-            Some((_, pp)) => dp_with_pos(&r, pp),
-            None => r,
-        });
+        *DP_SMOOTH_CUR.lock() = Some((now, r));
     }
     {
         let mut last = DP_SMOOTH_LAST.lock();
@@ -2227,18 +2230,35 @@ fn dp_smooth_next(real: Option<Vec<u8>>, now: std::time::Instant) -> Option<Vec<
         }
         *last = Some(now);
     }
-    let (t1, b1) = cur.as_ref()?;
-    let (t0, p0) = (*prev)?;
-    let p1 = dp_pos_of(b1)?;
-    let age = now.duration_since(*t1).as_secs_f32();
-    if age > 0.5 {
-        return None; // sender went quiet: stop repeating
+    let cur = DP_SMOOTH_CUR.lock();
+    let (t_new, bytes) = cur.as_ref()?;
+    if now.duration_since(*t_new).as_secs_f32() > 1.0 {
+        return None; // sender went quiet
     }
-    let span = t1.duration_since(t0).as_secs_f32().clamp(0.03, 0.25);
-    let f = (age / span).clamp(0.0, 1.0);
-    let p = [p0[0] + (p1[0] - p0[0]) * f, p0[1] + (p1[1] - p0[1]) * f, p0[2] + (p1[2] - p0[2]) * f];
+    let h = DP_HIST.lock();
+    let render = now.checked_sub(std::time::Duration::from_secs_f32(*DP_BUF_DELAY))?;
+    let mut pos = h.back()?.1;
+    let mut held = true;
+    for w in h.iter().collect::<Vec<_>>().windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if a.0 <= render && render <= b.0 {
+            let span = b.0.duration_since(a.0).as_secs_f32().max(0.001);
+            let f = (render.duration_since(a.0).as_secs_f32() / span).clamp(0.0, 1.0);
+            pos = [a.1[0] + (b.1[0] - a.1[0]) * f, a.1[1] + (b.1[1] - a.1[1]) * f, a.1[2] + (b.1[2] - a.1[2]) * f];
+            held = false;
+            break;
+        }
+    }
+    if held {
+        DP_SMOOTH_HELD.fetch_add(1, Ordering::Relaxed);
+        if let Some(first) = h.front() {
+            if render < first.0 {
+                pos = first.1;
+            }
+        }
+    }
     DP_SMOOTH_SYNTH.fetch_add(1, Ordering::Relaxed);
-    Some(dp_with_pos(b1, p))
+    Some(dp_with_pos(bytes, pos))
 }
 
 /// Build a fake session: a copy of the Debug session's 12-slot vtable with
@@ -2411,6 +2431,7 @@ fn dp_session_step() {
             sent_by_type = ?*DP_SEND_BY_TYPE.lock(),
             pos_at_16_matches_hero = ?*DP_POS_CHECK.lock(),
             smooth_synth = DP_SMOOTH_SYNTH.load(Ordering::Relaxed),
+            smooth_held = DP_SMOOTH_HELD.load(Ordering::Relaxed),
             recv_by_type = ?*DP_RECV_BY_TYPE.lock(),
             given_by_type = ?*DP_GIVEN_BY_TYPE.lock(),
             inbox = DP_INBOX.lock().len(),
@@ -2437,6 +2458,7 @@ unsafe fn dp_on_area_change(hero: usize) {
     DP_INBOX.lock().clear();
     *DP_SMOOTH_CUR.lock() = None;
     *DP_SMOOTH_PREV.lock() = None;
+    DP_HIST.lock().clear();
     *DP_CLONE_LAST.lock() = None;
     if alive {
         let warped = hero_pos().map(|p| native_warp(clone, [p[0] + 1.5, p[1], p[2]], [0.0; 4]));
