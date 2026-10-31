@@ -2198,6 +2198,9 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
                 DP_GAVE_TYPE1.store(true, Ordering::Relaxed);
             }
             dp_count(&DP_GIVEN_BY_TYPE, ty, p.len());
+            if ty == 24 {
+                DP_GIVEN24.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
     out
@@ -2548,6 +2551,10 @@ static BOT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 const BOT_SECS: f32 = 60.0;
 /// Per-frame samples: (time, clone pos, hero pos).
 static BOT_SAMPLES: Mutex<Vec<(f32, [f32; 3], [f32; 3])>> = Mutex::new(Vec::new());
+/// Per sample: (type-1 packets given, type-24 packets given, manip target,
+/// snap flag, T) so each clone jump can be matched to what happened.
+static BOT_CTX: Mutex<Vec<(u64, u64, [f32; 3], u8, f32)>> = Mutex::new(Vec::new());
+static DP_GIVEN24: AtomicU64 = AtomicU64::new(0);
 static BOT_LAST_SAMPLE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 fn bot_elapsed() -> Option<f32> {
@@ -2726,6 +2733,15 @@ fn bot_sample() {
         let mut v = BOT_SAMPLES.lock();
         if v.len() < 20_000 {
             v.push((t, c, h));
+            let m = unsafe { read_ptr(clone + 0x58).unwrap_or(0) };
+            let (tg, snap, tt) = unsafe {
+                (
+                    read_checked::<[f32; 3]>(m + 0x360).unwrap_or([0.0; 3]),
+                    read_checked::<u8>(m + 0x350).unwrap_or(9),
+                    read_checked::<f32>(m + 0x3cc).unwrap_or(-1.0),
+                )
+            };
+            BOT_CTX.lock().push((DP_PKT_SEQ.load(Ordering::Relaxed), DP_GIVEN24.load(Ordering::Relaxed), tg, snap, tt));
         }
     }
 }
@@ -2782,6 +2798,25 @@ fn bot_report() {
         buf_delay_ms = *DP_BUF_DELAY * 1000.0,
         "bot: summary"
     );
+    // Context of the first 12 clone jumps: the 3 samples before and the jump.
+    let ctx = std::mem::take(&mut *BOT_CTX.lock());
+    let mut shown = 0;
+    for i in 1..v.len().min(ctx.len()) {
+        if shown >= 12 {
+            break;
+        }
+        if dist(v[i - 1].1, v[i].1) > 0.4 && bot_vector(v[i].0).is_some() {
+            shown += 1;
+            for j in i.saturating_sub(3)..=i {
+                let (seq, g24, tg, snap, tt) = ctx[j];
+                tracing::info!(
+                    "bot: jump#{shown} t={:.3} clone=({:.2},{:.2},{:.2}) tgt=({:.2},{:.2},{:.2}) hero=({:.2},{:.2},{:.2}) step={:.2} pkts1={seq} pkts24={g24} snap={snap} T={:.3}",
+                    v[j].0, v[j].1[0], v[j].1[1], v[j].1[2], tg[0], tg[1], tg[2], v[j].2[0], v[j].2[1], v[j].2[2],
+                    if j > 0 { dist(v[j - 1].1, v[j].1) } else { 0.0 }, tt
+                );
+            }
+        }
+    }
     tracing::info!("bot: {}", bot_stats("hero ", &hs));
     tracing::info!("bot: {}", bot_stats("clone", &cs));
     tracing::info!("bot: done");
