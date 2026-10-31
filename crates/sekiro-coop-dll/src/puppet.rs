@@ -3082,6 +3082,731 @@ fn enemy_puppet_step() {
     }
 }
 
+// ---------------------------------------------------------------- enemy mirror (stage 2 test)
+
+/// Offline RE (2026-10-31), derived: on the owner side ComManipulator vt[11]
+/// (0x7e54f0) fills each enemy's 0x158 record from its behaviour sync state
+/// (module chr+0x1ff8 -> +0x28, state at +0x60) whenever that state changed
+/// (+0xb20 / +0xb21), then 0xa1b550 sets flag bit 3 and queues the id for
+/// packet 0x46. Layout: +0x00 u32[16] (count byte +0x140), +0x40 u64[32]
+/// (count byte +0x141), +0x142 u8 = 1, +0x143 u8, +0x144 u32, +0x148 target
+/// mode (1: u16 net id of the target at +0x14c, 2: vec3 at +0x14c). The
+/// packet serialiser 0x8e01c0 copies these fields raw, so the record holds
+/// no pointers. On a client NetAIManipulator (0x7ea5c0) feeds a record with
+/// flag bit 2 to module chr+0x1ff8 -> +0x30 (0xb4e9c0 / 0xb4eb70).
+/// `SEKIRO_COOP_ENEMY_MIRROR=1`: 20 s in, enemy A (nearest with a
+/// ComManipulator) keeps its own AI; enemy B (the next one, the same kind
+/// if possible) gets a NetAI manipulator and is fed copies of A's records:
+/// the 0x1c record every time B consumed the last one (A's position, 2.5 m
+/// to the side), the 0x158 record whenever A's changes. If B repeats A's
+/// moves and attacks, host enemy state can be replayed on a client.
+static ENEMY_MIRROR: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_ENEMY_MIRROR").map(|v| v == "1").unwrap_or(false)
+});
+static EM_T0: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static EM_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[derive(Clone, Copy)]
+struct EnemyRecs {
+    small: usize,
+    big: usize,
+    flags: usize,
+}
+/// (A chr, A recs, B chr, B recs)
+static EM_PAIR: Mutex<Option<(usize, EnemyRecs, usize, EnemyRecs)>> = Mutex::new(None);
+static EM_LAST_BIG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static EM_SMALL_W: AtomicU64 = AtomicU64::new(0);
+static EM_BIG_W: AtomicU64 = AtomicU64::new(0);
+static EM_BIG_CONSUMED: AtomicU64 = AtomicU64::new(0);
+static EM_BIT3: AtomicU64 = AtomicU64::new(0);
+static EM_ANIM_SAME: AtomicU64 = AtomicU64::new(0);
+static EM_ANIM_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static EM_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+unsafe fn enemy_recs(mgr: usize, id: u16) -> Option<EnemyRecs> {
+    if id == 0xffff {
+        return None;
+    }
+    let set = (id >> 11) as usize;
+    let slot = (id & 0x7ff) as usize;
+    if set as i32 >= read_checked::<i32>(mgr + 8)? {
+        return None;
+    }
+    let sp = read_ptr(mgr + 0x10 + set * 8)?;
+    if slot as i32 >= read_checked::<i32>(sp + 0x10)? {
+        return None;
+    }
+    let small = read_ptr(sp + 0x20)? + slot * 0x1c;
+    let big = read_ptr(sp + 0x28)? + slot * 0x158;
+    let flags = read_ptr(sp + 0x38)? + slot * 2;
+    (readable(small, 0x1c) && readable(big, 0x158) && readable(flags, 2)).then_some(EnemyRecs { small, big, flags })
+}
+
+/// Give `chr` a NetAI manipulator reading the records of net id `id`
+/// (ChrCtrl+0x358 override, run 85). Returns the manipulator.
+unsafe fn install_netai(chr: usize, id: u16) -> Option<usize> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let alloc_fn = base + 0x19de730;
+    let ctor = base + 0x7e9f10;
+    let bytes_ok = core::slice::from_raw_parts(alloc_fn as *const u8, 6) == [0x49, 0x8b, 0x00, 0x4d, 0x8b, 0xc8]
+        && core::slice::from_raw_parts(ctor as *const u8, 5) == [0x48, 0x89, 0x4c, 0x24, 0x08];
+    if !bytes_ok {
+        tracing::warn!("install_netai: allocator or NetAI ctor bytes differ");
+        return None;
+    }
+    let allocator = read_ptr(base + 0x3d9ce18)?;
+    let ctrl = read_ptr(chr + 0x50)?;
+    let alloc: unsafe extern "system" fn(usize, u32, usize) -> usize = core::mem::transmute(alloc_fn);
+    let make: unsafe extern "system" fn(usize) -> usize = core::mem::transmute(ctor);
+    let na = alloc(0x450, 0x10, allocator);
+    if na == 0 {
+        return None;
+    }
+    make(na);
+    RawPtr(na + 0x340).write::<u32>(id as u32);
+    RawPtr(ctrl + 0x358).write::<usize>(na);
+    Some(na)
+}
+
+fn enemy_mirror_step() {
+    if !*ENEMY_MIRROR || EM_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(hp) = hero_pos() else { return };
+    let now = std::time::Instant::now();
+    let t0 = *EM_T0.lock().get_or_insert(now);
+    if t0.elapsed().as_secs_f32() < 20.0 {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    unsafe {
+        let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) else { return };
+        let Some(mgr) = read_ptr(wcm + 0x630) else { return };
+        let mut pair = EM_PAIR.lock();
+        if pair.is_none() {
+            let Some(m) = crate::global() else { return };
+            let chrs: Vec<usize> = m.chrins_registry.lock().values().copied().collect();
+            // (dist, chr, id, chr kind)
+            let mut cands: Vec<(f32, usize, u16, u32)> = Vec::new();
+            for c in chrs {
+                let Some(manip) = read_ptr(c + 0x58) else { continue };
+                if read_checked::<usize>(manip) != Some(base + RVA_COM_MANIP_VT) {
+                    continue;
+                }
+                let Some(p) = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)) else { continue };
+                let id = read_checked::<u16>(manip + 0x360).unwrap_or(0xffff);
+                let d = dist(p, hp);
+                if d < 30.0 && id != 0xffff && enemy_recs(mgr, id).is_some() {
+                    cands.push((d, c, id, read_checked::<u32>(c + 0x68).unwrap_or(0)));
+                }
+            }
+            cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            tracing::info!(
+                cands = ?cands.iter().map(|c| format!("{:#x} d={:.1} id={:#06x} kind={}", c.1, c.0, c.2, c.3)).collect::<Vec<_>>(),
+                "enemy mirror: candidates"
+            );
+            if cands.len() < 2 {
+                tracing::warn!("enemy mirror: fewer than two enemies with a ComManipulator within 30 m");
+                EM_DONE.store(true, Ordering::Relaxed);
+                return;
+            }
+            let a = cands[0];
+            let b = cands[1..].iter().find(|c| c.3 == a.3).copied().unwrap_or(cands[1]);
+            let (Some(ra), Some(rb)) = (enemy_recs(mgr, a.2), enemy_recs(mgr, b.2)) else { return };
+            let Some(na) = install_netai(b.1, b.2) else {
+                EM_DONE.store(true, Ordering::Relaxed);
+                return;
+            };
+            let m30 = read_ptr(b.1 + 0x1ff8).and_then(|sm| read_ptr(sm + 0x30));
+            tracing::info!(
+                a = format!("{:#x} id={:#06x} kind={}", a.1, a.2, a.3),
+                b = format!("{:#x} id={:#06x} kind={}", b.1, b.2, b.3),
+                same_kind = a.3 == b.3,
+                netai = format!("{na:#x}"),
+                b_sync_module = ?m30.map(|v| format!("{v:#x}")),
+                b_sync_module_ready = ?m30.and_then(|v| read_checked::<usize>(v + 0x10)).map(|v| v != 0),
+                "enemy mirror: B now replays A's records"
+            );
+            *pair = Some((a.1, ra, b.1, rb));
+        }
+        let Some((ca, ra, cb, rb)) = *pair else { return };
+        // A's own update fills A's records; read them as they are.
+        let fa = read_checked::<u16>(ra.flags).unwrap_or(0);
+        let fb = read_checked::<u16>(rb.flags).unwrap_or(0);
+        let mut fb_new = fb;
+        if fb & 1 == 0 {
+            let mut small = core::slice::from_raw_parts(ra.small as *const u8, 0x1c).to_vec();
+            let x = f32::from_le_bytes([small[0], small[1], small[2], small[3]]) + 2.5;
+            small[0..4].copy_from_slice(&x.to_le_bytes());
+            core::ptr::copy_nonoverlapping(small.as_ptr(), rb.small as *mut u8, 0x1c);
+            fb_new = (fb_new & !0x100) | 1;
+            EM_SMALL_W.fetch_add(1, Ordering::Relaxed);
+        }
+        let big = core::slice::from_raw_parts(ra.big as *const u8, 0x158).to_vec();
+        let fresh = fa & 8 != 0;
+        if fresh {
+            EM_BIT3.fetch_add(1, Ordering::Relaxed);
+            RawPtr(ra.flags).write::<u16>(fa & !8);
+        }
+        {
+            let mut last = EM_LAST_BIG.lock();
+            if fresh || *last != big {
+                if fb & 4 == 0 && EM_BIG_W.load(Ordering::Relaxed) > 0 {
+                    EM_BIG_CONSUMED.fetch_add(1, Ordering::Relaxed);
+                }
+                core::ptr::copy_nonoverlapping(big.as_ptr(), rb.big as *mut u8, 0x158);
+                fb_new |= 4;
+                EM_BIG_W.fetch_add(1, Ordering::Relaxed);
+                *last = big.clone();
+            }
+        }
+        if fb_new != fb {
+            RawPtr(rb.flags).write::<u16>(fb_new);
+        }
+        let (aa, ab) = (anim_of(ca), anim_of(cb));
+        EM_ANIM_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        if aa.is_some() && aa == ab && aa != Some(0) {
+            EM_ANIM_SAME.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut l = EM_LAST_LOG.lock();
+        if l.map(|t| t.elapsed().as_secs_f32() >= 1.0).unwrap_or(true) {
+            *l = Some(now);
+            let pa = phys_pos_addr(ca).and_then(|a| read_checked::<[f32; 3]>(a));
+            let pb = phys_pos_addr(cb).and_then(|a| read_checked::<[f32; 3]>(a));
+            let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            tracing::info!(
+                anim_a = ?aa,
+                anim_b = ?ab,
+                pos_a = ?pa,
+                pos_b = ?pb,
+                d_ab = ?pa.zip(pb).map(|(a, b)| dist(a, b)),
+                d_hero_a = ?pa.map(|a| dist(a, hp)),
+                flags_a = format!("{fa:#x}"),
+                flags_b = format!("{:#x}", read_checked::<u16>(rb.flags).unwrap_or(0)),
+                small_w = EM_SMALL_W.load(Ordering::Relaxed),
+                big_w = EM_BIG_W.load(Ordering::Relaxed),
+                big_consumed = EM_BIG_CONSUMED.load(Ordering::Relaxed),
+                bit3 = EM_BIT3.load(Ordering::Relaxed),
+                anim_same = EM_ANIM_SAME.load(Ordering::Relaxed),
+                anim_samples = EM_ANIM_SAMPLES.load(Ordering::Relaxed),
+                n32 = big[0x140],
+                n64 = big[0x141],
+                b142 = big[0x142],
+                b143 = big[0x143],
+                u144 = u32::from_le_bytes([big[0x144], big[0x145], big[0x146], big[0x147]]),
+                mode = u32::from_le_bytes([big[0x148], big[0x149], big[0x14a], big[0x14b]]),
+                u32s = hex(&big[0..(big[0x140].min(16) as usize) * 4]),
+                u64s = hex(&big[0x40..0x40 + (big[0x141].min(32) as usize) * 8]),
+                "enemy mirror: state"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------- enemy replay (stage 2 test)
+
+/// Run 86 (`ENEMY_MIRROR`): the second enemy was asleep (anim -1, its
+/// receiving sync module not ready) and never consumed the records; the
+/// first stood idle 11 m away, so its 0x158 record changed once.
+/// `SEKIRO_COOP_ENEMY_REPLAY=1` uses one enemy instead, the way a client
+/// sees the host's copy of the same enemy: 12 s after the Hero appears pick
+/// the nearest enemy with a ComManipulator, make the bot circle it (so it
+/// fights), record its 0x1c / 0x158 records for 15 s, then give it a NetAI
+/// manipulator and play the recording back with the same timing. If it
+/// repeats its moves, records alone carry an enemy's actions. Every 0.5 s
+/// the log carries the enemy's animation candidates in both phases.
+static ENEMY_REPLAY: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_ENEMY_REPLAY").map(|v| v == "1").unwrap_or(false)
+});
+const ER_REC_SECS: f32 = 20.0;
+/// While recording: the enemy's live position, so the bot runs at it and
+/// strikes (run 87: the chosen enemy ignored a Hero circling it at 1 m).
+static ER_CHASE: Mutex<Option<[f32; 3]>> = Mutex::new(None);
+static ER_CLICK: Mutex<(Option<std::time::Instant>, bool)> = Mutex::new((None, false));
+static ER_CLICKS: AtomicU64 = AtomicU64::new(0);
+static ER_T0: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static ER_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// (enemy, its records, selection time)
+static ER_TARGET: Mutex<Option<(usize, EnemyRecs, std::time::Instant)>> = Mutex::new(None);
+/// Recording: (t, 0x1c record, fresh 0x158 record or None)
+static ER_TAPE: Mutex<Vec<(f32, [u8; 0x1c], Option<Vec<u8>>)>> = Mutex::new(Vec::new());
+static ER_LAST_BIG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static ER_NETAI: AtomicUsize = AtomicUsize::new(0);
+static ER_BIG_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static ER_SMALL_W: AtomicU64 = AtomicU64::new(0);
+static ER_BIG_W: AtomicU64 = AtomicU64::new(0);
+static ER_BIG_SKIPPED: AtomicU64 = AtomicU64::new(0);
+static ER_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Words that may hold an enemy's animation: TimeAct-ish module (bag+0x10)
+/// +0x00..+0x60, as u32 hex.
+unsafe fn er_anim_words(c: usize) -> String {
+    let Some(sm) = read_ptr(c + 0x1ff8) else { return String::new() };
+    let Some(m) = read_ptr(sm + 0x10) else { return String::new() };
+    if !readable(m, 0x60) {
+        return String::new();
+    }
+    (0..0x18).map(|i| format!("{:x}", RawPtr(m + i * 4).read::<u32>())).collect::<Vec<_>>().join(",")
+}
+
+/// Left mouse button = attack (PC default). Pressed for ~0.15 s every 0.8 s,
+/// only while the game window is in front (the same rule as autoload).
+#[cfg(windows)]
+fn er_click(near: bool) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn mouse_event(flags: u32, dx: u32, dy: u32, data: u32, extra: usize);
+    }
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+        if pid != GetCurrentProcessId() {
+            return;
+        }
+        let mut st = ER_CLICK.lock();
+        let since = st.0.map(|t| t.elapsed().as_secs_f32()).unwrap_or(99.0);
+        if st.1 && since >= 0.15 {
+            mouse_event(0x4, 0, 0, 0, 0); // LEFTUP
+            st.1 = false;
+        } else if !st.1 && near && since >= 0.8 {
+            mouse_event(0x2, 0, 0, 0, 0); // LEFTDOWN
+            st.0 = Some(std::time::Instant::now());
+            st.1 = true;
+            ER_CLICKS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+#[cfg(windows)]
+fn er_click_release() {
+    #[link(name = "user32")]
+    extern "system" {
+        fn mouse_event(flags: u32, dx: u32, dy: u32, data: u32, extra: usize);
+    }
+    let mut st = ER_CLICK.lock();
+    if st.1 {
+        unsafe { mouse_event(0x4, 0, 0, 0, 0) };
+        st.1 = false;
+    }
+}
+#[cfg(not(windows))]
+fn er_click(_near: bool) {}
+#[cfg(not(windows))]
+fn er_click_release() {}
+
+fn enemy_replay_step() {
+    if !*ENEMY_REPLAY || ER_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(hp) = hero_pos() else { return };
+    let now = std::time::Instant::now();
+    let t0 = *ER_T0.lock().get_or_insert(now);
+    if t0.elapsed().as_secs_f32() < 12.0 {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    unsafe {
+        let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) else { return };
+        let Some(mgr) = read_ptr(wcm + 0x630) else { return };
+        let mut tgt = ER_TARGET.lock();
+        if tgt.is_none() {
+            let Some(m) = crate::global() else { return };
+            let chrs: Vec<usize> = m.chrins_registry.lock().values().copied().collect();
+            let mut best: Option<(f32, usize, u16, [f32; 3])> = None;
+            for c in chrs {
+                let Some(manip) = read_ptr(c + 0x58) else { continue };
+                if read_checked::<usize>(manip) != Some(base + RVA_COM_MANIP_VT) {
+                    continue;
+                }
+                let Some(p) = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)) else { continue };
+                let id = read_checked::<u16>(manip + 0x360).unwrap_or(0xffff);
+                let d = dist(p, hp);
+                if d < 30.0 && id != 0xffff && enemy_recs(mgr, id).is_some() && best.map(|b| d < b.0).unwrap_or(true) {
+                    best = Some((d, c, id, p));
+                }
+            }
+            let Some((d, c, id, p)) = best else {
+                tracing::warn!("enemy replay: no enemy with a ComManipulator within 30 m");
+                ER_DONE.store(true, Ordering::Relaxed);
+                return;
+            };
+            let Some(r) = enemy_recs(mgr, id) else { return };
+            *BOT_CENTER.lock() = Some(p);
+            tracing::info!(
+                chr = format!("{c:#x}"),
+                kind = ?read_checked::<u32>(c + 0x68),
+                id = format!("{id:#06x}"),
+                d,
+                "enemy replay: recording this enemy; the bot now circles it"
+            );
+            *tgt = Some((c, r, now));
+        }
+        let Some((c, r, ts)) = *tgt else { return };
+        let t = ts.elapsed().as_secs_f32();
+        let phase_rec = t < ER_REC_SECS;
+        if phase_rec {
+            let pe = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a));
+            *ER_CHASE.lock() = pe;
+            er_click(pe.map(|e| dist(e, hp) < 2.5).unwrap_or(false));
+            let small: [u8; 0x1c] = RawPtr(r.small).read::<[u8; 0x1c]>();
+            let big = core::slice::from_raw_parts(r.big as *const u8, 0x158).to_vec();
+            let f = read_checked::<u16>(r.flags).unwrap_or(0);
+            let mut last = ER_LAST_BIG.lock();
+            let fresh = f & 8 != 0 || *last != big;
+            if f & 8 != 0 {
+                RawPtr(r.flags).write::<u16>(f & !8);
+            }
+            if fresh {
+                *last = big.clone();
+            }
+            ER_TAPE.lock().push((t, small, fresh.then_some(big)));
+        } else {
+            let tr = t - ER_REC_SECS;
+            if ER_CHASE.lock().take().is_some() {
+                er_click_release();
+            }
+            if tr > ER_REC_SECS + 2.0 {
+                let tape = ER_TAPE.lock();
+                tracing::info!(
+                    tape = tape.len(),
+                    tape_big = tape.iter().filter(|e| e.2.is_some()).count(),
+                    small_w = ER_SMALL_W.load(Ordering::Relaxed),
+                    big_w = ER_BIG_W.load(Ordering::Relaxed),
+                    big_skipped = ER_BIG_SKIPPED.load(Ordering::Relaxed),
+                    clicks = ER_CLICKS.load(Ordering::Relaxed),
+                    "enemy replay: done"
+                );
+                ER_DONE.store(true, Ordering::Relaxed);
+                return;
+            }
+            if ER_NETAI.load(Ordering::Relaxed) == 0 {
+                let id = (|| read_checked::<u16>(read_ptr(c + 0x58)? + 0x360))().unwrap_or(0xffff);
+                let Some(na) = install_netai(c, id) else {
+                    ER_DONE.store(true, Ordering::Relaxed);
+                    return;
+                };
+                ER_NETAI.store(na, Ordering::Relaxed);
+                let tape = ER_TAPE.lock();
+                tracing::info!(
+                    netai = format!("{na:#x}"),
+                    tape = tape.len(),
+                    tape_big = tape.iter().filter(|e| e.2.is_some()).count(),
+                    "enemy replay: enemy now on a NetAI manipulator, playing the recording back"
+                );
+            }
+            let tape = ER_TAPE.lock();
+            let f = read_checked::<u16>(r.flags).unwrap_or(0);
+            let mut nf = f;
+            // 0x1c: the newest recorded sample at or before tr, when the last one was consumed.
+            if f & 1 == 0 {
+                if let Some(e) = tape.iter().rev().find(|e| e.0 <= tr) {
+                    RawPtr(r.small).write::<[u8; 0x1c]>(e.1);
+                    nf = (nf & !0x100) | 1;
+                    ER_SMALL_W.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            // 0x158: in recorded order, one per consumption.
+            if f & 4 == 0 {
+                let mut cur = ER_BIG_CURSOR.load(Ordering::Relaxed);
+                while cur < tape.len() && tape[cur].2.is_none() {
+                    cur += 1;
+                }
+                if cur < tape.len() && tape[cur].0 <= tr {
+                    let big = tape[cur].2.as_ref().unwrap();
+                    core::ptr::copy_nonoverlapping(big.as_ptr(), r.big as *mut u8, 0x158);
+                    nf |= 4;
+                    ER_BIG_W.fetch_add(1, Ordering::Relaxed);
+                    cur += 1;
+                }
+                ER_BIG_CURSOR.store(cur, Ordering::Relaxed);
+            } else {
+                ER_BIG_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            }
+            if nf != f {
+                RawPtr(r.flags).write::<u16>(nf);
+            }
+        }
+        let mut l = ER_LAST_LOG.lock();
+        if l.map(|x| x.elapsed().as_secs_f32() >= 0.5).unwrap_or(true) {
+            *l = Some(now);
+            let pe = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a));
+            let big = core::slice::from_raw_parts(r.big as *const u8, 0x158);
+            let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            tracing::info!(
+                phase = if phase_rec { "rec" } else { "play" },
+                t = format!("{:.2}", if phase_rec { t } else { t - ER_REC_SECS }),
+                pos = ?pe,
+                d_hero = ?pe.map(|e| dist(e, hp)),
+                anim = ?anim_of(c),
+                words = er_anim_words(c),
+                flags = format!("{:#x}", read_checked::<u16>(r.flags).unwrap_or(0)),
+                u32s = hex(&big[0..(big[0x140].min(16) as usize) * 4]),
+                u64s = hex(&big[0x40..0x40 + (big[0x141].min(32) as usize) * 8]),
+                mode = u32::from_le_bytes([big[0x148], big[0x149], big[0x14a], big[0x14b]]),
+                "enemy replay: sample"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------- enemy sync over the network (stage 2)
+
+/// `SEKIRO_COOP_ENEMY_SYNC`:
+/// - `host`: send the sync records of our enemies (ComManipulator, within
+///   60 m of the Hero) to the other game: the 0x1c record every 50 ms, the
+///   0x158 record when it changes (PacketBody::EnemyRec, one per packet).
+/// - `client`: for every net id heard from the host, give our enemy with
+///   that id a NetAI manipulator and feed it the host's records, delayed
+///   by a short jitter buffer (sender clock, 150 ms).
+/// - `loop`: both in one game, for the mirror test: send the nearest
+///   enemy's records until 20 s after the first send, then drive the same
+///   enemy from the copies that came back through the network, 20 s late.
+///   (Replay, run 87, did the same without the network.)
+static ENEMY_SYNC: Lazy<String> = Lazy::new(|| std::env::var("SEKIRO_COOP_ENEMY_SYNC").unwrap_or_default());
+const ES_RANGE: f32 = 60.0;
+const ES_SMALL_EVERY_MS: u64 = 50;
+const ES_LOOP_SWITCH_MS: u64 = 20_000;
+static ES_T0: Lazy<std::time::Instant> = Lazy::new(std::time::Instant::now);
+fn es_now_ms() -> u64 {
+    ES_T0.elapsed().as_millis() as u64
+}
+static ES_OUTBOX: Mutex<Vec<(u64, u16, Vec<u8>, Option<Vec<u8>>)>> = Mutex::new(Vec::new());
+/// Host side per id: (last small sent ms, last big sent).
+static ES_SENT: Lazy<Mutex<std::collections::HashMap<u16, (u64, Vec<u8>)>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+/// Host side: enemies to send, refreshed every second: (chr, id).
+static ES_HOST_LIST: Mutex<(Option<std::time::Instant>, Vec<(usize, u16)>)> = Mutex::new((None, Vec::new()));
+static ES_FIRST_SEND: Mutex<Option<u64>> = Mutex::new(None);
+static ES_TX_SMALL: AtomicU64 = AtomicU64::new(0);
+static ES_TX_BIG: AtomicU64 = AtomicU64::new(0);
+/// Client side, per id: queued (sender ms, small, big), newest small at or
+/// before the render time, bigs waiting to be consumed, NetAI installed.
+#[derive(Default)]
+struct EsRemote {
+    queue: std::collections::VecDeque<(u64, Vec<u8>, Option<Vec<u8>>)>,
+    cur_small: Option<Vec<u8>>,
+    bigs: std::collections::VecDeque<Vec<u8>>,
+    chr: usize,
+    netai: usize,
+    rx: u64,
+    small_w: u64,
+    big_w: u64,
+}
+static ES_REMOTE: Lazy<Mutex<std::collections::HashMap<u16, EsRemote>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+/// Smallest (our ms - sender ms) seen: maps sender time to ours.
+static ES_MIN_OFF: Mutex<Option<i64>> = Mutex::new(None);
+static ES_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn es_is_host() -> bool {
+    matches!(ENEMY_SYNC.as_str(), "host" | "loop")
+}
+fn es_is_client() -> bool {
+    matches!(ENEMY_SYNC.as_str(), "client" | "loop")
+}
+
+pub fn enemy_take_outbox() -> Vec<(u64, u16, Vec<u8>, Option<Vec<u8>>)> {
+    if !es_is_host() {
+        return Vec::new();
+    }
+    std::mem::take(&mut *ES_OUTBOX.lock())
+}
+
+pub fn enemy_note_remote(sent_ms: u64, id: u16, small: Vec<u8>, big: Option<Vec<u8>>) {
+    if !es_is_client() || small.len() != 0x1c || big.as_ref().map(|b| b.len() != 0x158).unwrap_or(false) {
+        return;
+    }
+    let off = es_now_ms() as i64 - sent_ms as i64;
+    {
+        let mut m = ES_MIN_OFF.lock();
+        if m.map(|v| off < v).unwrap_or(true) {
+            *m = Some(off);
+        }
+    }
+    let mut r = ES_REMOTE.lock();
+    let e = r.entry(id).or_default();
+    e.rx += 1;
+    e.queue.push_back((sent_ms, small, big));
+    while e.queue.len() > 2000 {
+        e.queue.pop_front();
+    }
+}
+
+/// Enemies with a ComManipulator and a sync record, within `range` of `hp`.
+unsafe fn es_enemies(mgr: usize, hp: [f32; 3], range: f32) -> Vec<(f32, usize, u16)> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let Some(m) = crate::global() else { return Vec::new() };
+    let chrs: Vec<usize> = m.chrins_registry.lock().values().copied().collect();
+    let mut out = Vec::new();
+    for c in chrs {
+        let Some(manip) = read_ptr(c + 0x58) else { continue };
+        if read_checked::<usize>(manip) != Some(base + RVA_COM_MANIP_VT) {
+            continue;
+        }
+        let Some(p) = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)) else { continue };
+        let id = read_checked::<u16>(manip + 0x360).unwrap_or(0xffff);
+        let d = dist(p, hp);
+        if d < range && enemy_recs(mgr, id).is_some() {
+            out.push((d, c, id));
+        }
+    }
+    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+fn enemy_sync_step() {
+    if ENEMY_SYNC.is_empty() {
+        return;
+    }
+    let Some(hp) = hero_pos() else { return };
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let now = es_now_ms();
+    unsafe {
+        let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) else { return };
+        let Some(mgr) = read_ptr(wcm + 0x630) else { return };
+        let looping = ENEMY_SYNC.as_str() == "loop";
+        // ---- host: collect records
+        if es_is_host() {
+            let first = *ES_FIRST_SEND.lock();
+            let stop = looping && first.map(|f| now >= f + ES_LOOP_SWITCH_MS).unwrap_or(false);
+            if !stop {
+                let mut hl = ES_HOST_LIST.lock();
+                if hl.0.map(|t| t.elapsed().as_secs_f32() >= 1.0).unwrap_or(true) {
+                    let mut list: Vec<(usize, u16)> = es_enemies(mgr, hp, ES_RANGE).into_iter().map(|e| (e.1, e.2)).collect();
+                    if looping {
+                        list.truncate(1);
+                    }
+                    *hl = (Some(std::time::Instant::now()), list);
+                }
+                let mut sent = ES_SENT.lock();
+                let mut ob = ES_OUTBOX.lock();
+                for &(_c, id) in hl.1.iter() {
+                    let Some(r) = enemy_recs(mgr, id) else { continue };
+                    let small = core::slice::from_raw_parts(r.small as *const u8, 0x1c).to_vec();
+                    let big = core::slice::from_raw_parts(r.big as *const u8, 0x158).to_vec();
+                    let f = read_checked::<u16>(r.flags).unwrap_or(0);
+                    if f & 8 != 0 {
+                        RawPtr(r.flags).write::<u16>(f & !8);
+                    }
+                    let e = sent.entry(id).or_insert((0, Vec::new()));
+                    let big_new = f & 8 != 0 || e.1 != big;
+                    if !big_new && now < e.0 + ES_SMALL_EVERY_MS {
+                        continue;
+                    }
+                    e.0 = now;
+                    ES_TX_SMALL.fetch_add(1, Ordering::Relaxed);
+                    let big_out = if big_new {
+                        e.1 = big.clone();
+                        ES_TX_BIG.fetch_add(1, Ordering::Relaxed);
+                        Some(big)
+                    } else {
+                        None
+                    };
+                    if ob.len() < 512 {
+                        ob.push((now, id, small, big_out));
+                    }
+                    ES_FIRST_SEND.lock().get_or_insert(now);
+                }
+            }
+        }
+        // ---- client: drive enemies from received records
+        if es_is_client() {
+            let first = *ES_FIRST_SEND.lock();
+            let ready = !looping || first.map(|f| now >= f + ES_LOOP_SWITCH_MS).unwrap_or(false);
+            let delay: i64 = if looping { ES_LOOP_SWITCH_MS as i64 } else { 150 };
+            let off = *ES_MIN_OFF.lock();
+            if ready {
+                if let Some(off) = off {
+                    let render = now as i64 - off - delay;
+                    let mut rem = ES_REMOTE.lock();
+                    let mut ids_missing = Vec::new();
+                    for (id, e) in rem.iter_mut() {
+                        while e.queue.front().map(|q| (q.0 as i64) <= render).unwrap_or(false) {
+                            let (_, small, big) = e.queue.pop_front().unwrap();
+                            e.cur_small = Some(small);
+                            if let Some(b) = big {
+                                e.bigs.push_back(b);
+                            }
+                        }
+                        if e.cur_small.is_none() {
+                            continue;
+                        }
+                        if e.netai == 0 {
+                            let list = es_enemies(mgr, hp, 200.0);
+                            let Some(&(_, c, _)) = list.iter().find(|x| x.2 == *id) else {
+                                ids_missing.push(*id);
+                                continue;
+                            };
+                            let Some(na) = install_netai(c, *id) else { continue };
+                            e.chr = c;
+                            e.netai = na;
+                            tracing::info!(id = format!("{id:#06x}"), chr = format!("{c:#x}"), kind = ?read_checked::<u32>(c + 0x68), "enemy sync: enemy now driven by the host's records");
+                        }
+                        let Some(r) = enemy_recs(mgr, *id) else { continue };
+                        let f = read_checked::<u16>(r.flags).unwrap_or(0);
+                        let mut nf = f;
+                        if f & 1 == 0 {
+                            if let Some(sm) = &e.cur_small {
+                                core::ptr::copy_nonoverlapping(sm.as_ptr(), r.small as *mut u8, 0x1c);
+                                nf = (nf & !0x100) | 1;
+                                e.small_w += 1;
+                            }
+                        }
+                        if f & 4 == 0 {
+                            if let Some(b) = e.bigs.pop_front() {
+                                core::ptr::copy_nonoverlapping(b.as_ptr(), r.big as *mut u8, 0x158);
+                                nf |= 4;
+                                e.big_w += 1;
+                            }
+                        }
+                        if nf != f {
+                            RawPtr(r.flags).write::<u16>(nf);
+                        }
+                    }
+                    if !ids_missing.is_empty() {
+                        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !WARNED.swap(true, Ordering::Relaxed) {
+                            tracing::warn!(ids = ?ids_missing, "enemy sync: no local enemy with these ids (yet)");
+                        }
+                    }
+                }
+            }
+        }
+        let mut l = ES_LAST_LOG.lock();
+        if l.map(|t| t.elapsed().as_secs_f32() >= 2.0).unwrap_or(true) {
+            *l = Some(std::time::Instant::now());
+            let rem = ES_REMOTE.lock();
+            let driven: Vec<String> = rem
+                .iter()
+                .map(|(id, e)| {
+                    let pos = if e.chr != 0 { phys_pos_addr(e.chr).and_then(|a| read_checked::<[f32; 3]>(a)) } else { None };
+                    let tgt = e.cur_small.as_ref().map(|s| {
+                        let f = |i: usize| f32::from_le_bytes([s[i], s[i + 1], s[i + 2], s[i + 3]]);
+                        [f(0), f(4), f(8)]
+                    });
+                    format!(
+                        "{id:#06x}: rx={} queued={} bigs_waiting={} small_w={} big_w={} netai={} d_target={:?}",
+                        e.rx,
+                        e.queue.len(),
+                        e.bigs.len(),
+                        e.small_w,
+                        e.big_w,
+                        e.netai != 0,
+                        pos.zip(tgt).map(|(p, t)| dist(p, t))
+                    )
+                })
+                .collect();
+            tracing::info!(
+                mode = ENEMY_SYNC.as_str(),
+                tx_small = ES_TX_SMALL.load(Ordering::Relaxed),
+                tx_big = ES_TX_BIG.load(Ordering::Relaxed),
+                host_list = ES_HOST_LIST.lock().1.len(),
+                min_off = ?*ES_MIN_OFF.lock(),
+                ?driven,
+                "enemy sync: state"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------- test bot
 
 /// In-game test bot (coop-anything rule 11: test with bots, not people).
@@ -3132,6 +3857,11 @@ static BOT_CENTER: Mutex<Option<[f32; 3]>> = Mutex::new(None);
 fn bot_steer(t: f32) -> Option<[f32; 2]> {
     bot_vector(t)?;
     let h = hero_pos()?;
+    if let Some(e) = *ER_CHASE.lock() {
+        let (dx, dz) = (e[0] - h[0], e[2] - h[2]);
+        let len = (dx * dx + dz * dz).sqrt();
+        return (len > 1.2).then(|| [dx / len, dz / len]);
+    }
     let c = *BOT_CENTER.lock().get_or_insert(h);
     let a = t * std::f32::consts::TAU / 4.0;
     let goal = [c[0] + 3.0 * a.sin(), c[2] + 3.0 * a.cos()];
@@ -3968,6 +4698,9 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     dp_session_step();
     enemy_probe_step();
     enemy_puppet_step();
+    enemy_mirror_step();
+    enemy_replay_step();
+    enemy_sync_step();
     bot_autoload_step();
     bot_step();
     clone_diff_step();

@@ -118,6 +118,10 @@ pub enum PacketBody {
     /// The sender's ChrAsm equip ids and face (PlayerGameData copies), so
     /// the receiver's clone can look like the sender.
     Appearance { bytes: Vec<u8> },
+    /// One enemy's sync records from the host's game (stage 2): `small` is
+    /// the 0x1c record (position, rotation), `big` the 0x158 behaviour
+    /// record when it changed. `sent_ms` is the sender's clock.
+    EnemyRec { sent_ms: u64, id: u16, small: Vec<u8>, big: Option<Vec<u8>> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
