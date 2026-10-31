@@ -2166,7 +2166,17 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
     let now = std::time::Instant::now();
     let pkt = {
         let mut q = DP_INBOX.lock();
-        let i = q.iter().position(|(due, t, _)| *t == ty && *due <= now);
+        // Run 71 (bot): the clone still jumps ~2 times a second. Type-1
+        // positions are shown 120 ms late by the jitter buffer, but other
+        // types (24: action/behaviour events) were applied at once, possibly
+        // carrying the newer position. With smoothing on, hold them back by
+        // the same delay. SEKIRO_COOP_DP_SYNC_OTHERS=0 turns this off.
+        let hold = if ty != 1 && *DP_SMOOTH && *DP_SYNC_OTHERS {
+            std::time::Duration::from_secs_f32(*DP_BUF_DELAY)
+        } else {
+            std::time::Duration::ZERO
+        };
+        let i = q.iter().position(|(due, t, _)| *t == ty && *due + hold <= now);
         i.and_then(|i| q.remove(i)).map(|(_, _, b)| b)
     };
     let pkt = if ty == 1 && *DP_SMOOTH { dp_smooth_next(pkt, now) } else { pkt };
@@ -2215,6 +2225,9 @@ static DP_BUF_DELAY: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_DELAY_BUF_MS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(120.0) / 1000.0
 });
 static DP_SMOOTH_HELD: AtomicU64 = AtomicU64::new(0);
+static DP_SYNC_OTHERS: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_SYNC_OTHERS").map(|v| v != "0").unwrap_or(true)
+});
 
 fn dp_smooth_next(real: Option<Vec<u8>>, now: std::time::Instant) -> Option<Vec<u8>> {
     if let Some(r) = real {
