@@ -2918,6 +2918,163 @@ fn enemy_probe_step() {
     }
 }
 
+// ---------------------------------------------------------------- enemy puppet (stage 2 test)
+
+/// Can the game drive an enemy from a sync record, as on a DS3 client?
+/// Record flags (u16 per slot at set+0x38): bit 0 = a fresh 0x1c record is
+/// waiting (NetAI's getter 0xa1bd10 clears it and sets 0x100), bit 2 = a
+/// fresh 0x158 record (cleared by 0xa1b2d0). NetAIManipulator: vt 0x29d3eb8,
+/// ctor 0x7e9f10(this) (0x450 bytes, allocated like the factory does with
+/// 0x19de730(0x450, 0x10, [0x3d9ce18])), net id at +0x340 (0xffff = none).
+/// `SEKIRO_COOP_ENEMY_PUPPET=1`: 20 s after the Hero appears, take the
+/// nearest enemy with a ComManipulator within 20 m, give it a NetAI
+/// manipulator with its own net id, and keep writing its 0x1c record with
+/// the Hero's position from 1.5 s ago (2 m to the side) and setting bit 0.
+/// If the enemy walks the Hero's path, records can drive enemies.
+static ENEMY_PUPPET: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_ENEMY_PUPPET").map(|v| v == "1").unwrap_or(false)
+});
+static EP_T0: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// (enemy, its record, its flags word, NetAI manipulator)
+static EP_TARGET: Mutex<Option<(usize, usize, usize, usize)>> = Mutex::new(None);
+static EP_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static EP_TRAIL: Mutex<std::collections::VecDeque<(std::time::Instant, [f32; 3])>> =
+    Mutex::new(std::collections::VecDeque::new());
+static EP_WRITES: AtomicU64 = AtomicU64::new(0);
+static EP_CONSUMED: AtomicU64 = AtomicU64::new(0);
+static EP_LAST_LOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+unsafe fn ep_record(mgr: usize, id: u16) -> Option<(usize, usize)> {
+    if id == 0xffff {
+        return None;
+    }
+    let set = (id >> 11) as usize;
+    let slot = (id & 0x7ff) as usize;
+    if set as i32 >= read_checked::<i32>(mgr + 8)? {
+        return None;
+    }
+    let sp = read_ptr(mgr + 0x10 + set * 8)?;
+    if slot as i32 >= read_checked::<i32>(sp + 0x10)? {
+        return None;
+    }
+    let rec = read_ptr(sp + 0x20)? + slot * 0x1c;
+    let flags = read_ptr(sp + 0x38)? + slot * 2;
+    (readable(rec, 0x1c) && readable(flags, 2)).then_some((rec, flags))
+}
+
+fn enemy_puppet_step() {
+    if !*ENEMY_PUPPET || EP_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(hp) = hero_pos() else { return };
+    let now = std::time::Instant::now();
+    {
+        let mut tr = EP_TRAIL.lock();
+        tr.push_back((now, hp));
+        while tr.len() > 600 {
+            tr.pop_front();
+        }
+    }
+    let t0 = *EP_T0.lock().get_or_insert(now);
+    if t0.elapsed().as_secs_f32() < 20.0 {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    unsafe {
+        let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) else { return };
+        let Some(mgr) = read_ptr(wcm + 0x630) else { return };
+        let mut tgt = EP_TARGET.lock();
+        if tgt.is_none() {
+            let Some(m) = crate::global() else { return };
+            let chrs: Vec<usize> = m.chrins_registry.lock().values().copied().collect();
+            let mut best: Option<(f32, usize, usize, u16)> = None;
+            for c in chrs {
+                let Some(manip) = read_ptr(c + 0x58) else { continue };
+                if read_checked::<usize>(manip) != Some(base + RVA_COM_MANIP_VT) {
+                    continue;
+                }
+                let Some(p) = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)) else { continue };
+                let d = dist(p, hp);
+                let id = read_checked::<u16>(manip + 0x360).unwrap_or(0xffff);
+                if d < 20.0 && id != 0xffff && best.map(|b| d < b.0).unwrap_or(true) {
+                    best = Some((d, c, manip, id));
+                }
+            }
+            let Some((d, c, _old, id)) = best else {
+                tracing::warn!("enemy puppet: no enemy with a ComManipulator within 20 m");
+                EP_DONE.store(true, Ordering::Relaxed);
+                return;
+            };
+            let Some((rec, flags)) = ep_record(mgr, id) else {
+                tracing::warn!(id, "enemy puppet: no record for the enemy's id");
+                EP_DONE.store(true, Ordering::Relaxed);
+                return;
+            };
+            let alloc_fn = base + 0x19de730;
+            let ctor = base + 0x7e9f10;
+            let bytes_ok = core::slice::from_raw_parts(alloc_fn as *const u8, 6) == [0x49, 0x8b, 0x00, 0x4d, 0x8b, 0xc8]
+                && core::slice::from_raw_parts(ctor as *const u8, 5) == [0x48, 0x89, 0x4c, 0x24, 0x08];
+            let Some(allocator) = read_ptr(base + 0x3d9ce18) else { return };
+            if !bytes_ok {
+                tracing::warn!("enemy puppet: allocator or NetAI ctor bytes differ");
+                EP_DONE.store(true, Ordering::Relaxed);
+                return;
+            }
+            let alloc: unsafe extern "system" fn(usize, u32, usize) -> usize = core::mem::transmute(alloc_fn);
+            let make: unsafe extern "system" fn(usize) -> usize = core::mem::transmute(ctor);
+            let na = alloc(0x450, 0x10, allocator);
+            if na == 0 {
+                return;
+            }
+            make(na);
+            RawPtr(na + 0x340).write::<u32>(id as u32);
+            RawPtr(c + 0x58).write::<usize>(na);
+            tracing::info!(
+                chr = format!("{c:#x}"),
+                chr_id = ?read_checked::<u32>(c + 0x68),
+                d,
+                id = format!("{id:#06x}"),
+                netai = format!("{na:#x}"),
+                vt_ok = read_checked::<usize>(na) == Some(base + RVA_NETAI_MANIP_VT),
+                "enemy puppet: enemy now has a NetAI manipulator"
+            );
+            *tgt = Some((c, rec, flags, na));
+        }
+        let Some((c, rec, flags, _na)) = *tgt else { return };
+        // Hero's position 1.5 s ago, 2 m to the side.
+        let past = {
+            let tr = EP_TRAIL.lock();
+            tr.iter().rev().find(|(t, _)| now.duration_since(*t).as_secs_f32() >= 1.5).map(|e| e.1)
+        };
+        let Some(p) = past else { return };
+        let target = [p[0] + 2.0, p[1], p[2]];
+        let f = read_checked::<u16>(flags).unwrap_or(0);
+        if f & 1 == 0 {
+            if f & 0x100 != 0 {
+                EP_CONSUMED.fetch_add(1, Ordering::Relaxed);
+            }
+            RawPtr(rec).write::<[f32; 3]>(target);
+            RawPtr(flags).write::<u16>((f & !0x100) | 1);
+            EP_WRITES.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut l = EP_LAST_LOG.lock();
+        if l.map(|t| t.elapsed().as_secs_f32() >= 2.0).unwrap_or(true) {
+            *l = Some(now);
+            let ep = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a));
+            tracing::info!(
+                enemy_pos = ?ep,
+                target = ?target,
+                dist_to_target = ?ep.map(|e| dist(e, target)),
+                writes = EP_WRITES.load(Ordering::Relaxed),
+                consumed = EP_CONSUMED.load(Ordering::Relaxed),
+                flags = format!("{f:#x}"),
+                anim = ?anim_of(c),
+                "enemy puppet: state"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------- test bot
 
 /// In-game test bot (coop-anything rule 11: test with bots, not people).
@@ -3803,6 +3960,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
     }
     dp_session_step();
     enemy_probe_step();
+    enemy_puppet_step();
     bot_autoload_step();
     bot_step();
     clone_diff_step();
