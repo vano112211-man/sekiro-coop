@@ -2228,6 +2228,9 @@ static DP_BUF_DELAY: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_DELAY_BUF_MS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(120.0) / 1000.0
 });
 static DP_SMOOTH_HELD: AtomicU64 = AtomicU64::new(0);
+static DP_KEEP_Y: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_DP_KEEP_Y").map(|v| v != "0").unwrap_or(true)
+});
 static DP_SYNC_OTHERS: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_SYNC_OTHERS").map(|v| v != "0").unwrap_or(true)
 });
@@ -2273,6 +2276,19 @@ fn dp_smooth_next(real: Option<Vec<u8>>, now: std::time::Instant) -> Option<Vec<
         if let Some(first) = h.front() {
             if render < first.0 {
                 pos = first.1;
+            }
+        }
+    }
+    // Run 73 (bot jump log): every jump is a snap (+0x350) right when a packet
+    // lands, with the clone 0.5-1 m ABOVE the packet height (it stands on
+    // whatever its own collision finds: steps, slopes, a building edge) while
+    // the x/z error is tiny. |delta| / T then passes 20 m/s at T = 1/30 s.
+    // Use the clone's own height unless it is far off (jump, fall, ledge).
+    let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+    if *DP_KEEP_Y {
+        if let Some(c) = unsafe { phys_pos_addr(clone).and_then(|a| read_checked::<[f32; 3]>(a)) } {
+            if (c[1] - pos[1]).abs() < 1.5 {
+                pos[1] = c[1];
             }
         }
     }
