@@ -101,7 +101,12 @@ set SEKIRO_COOP_ENEMY_PROBE=
 set SEKIRO_COOP_ENEMY_PUPPET=
 set SEKIRO_COOP_ENEMY_MIRROR=
 set SEKIRO_COOP_ENEMY_REPLAY=
-set SEKIRO_COOP_ENEMY_SYNC=loop
+set SEKIRO_COOP_ENEMY_SYNC=
+rem Test knob: sleep this many ms once a frame while the bot runs (14 gives ~38 fps).
+rem e.g. set BOT_FRAME_SLEEP_MS=14 before running for ~38 fps
+set SEKIRO_COOP_BOT_FRAME_SLEEP_MS=%BOT_FRAME_SLEEP_MS%
+set SEKIRO_COOP_DP_T_GATE=
+set SEKIRO_COOP_DP_SMOOTH_MS=
 set SEKIRO_COOP_CLONE_PATCH=
 set SEKIRO_COOP_PUPPET_PHASES=
 if not "%~1"=="" if not "%~1"=="-" set SEKIRO_COOP_PUPPET_WARP_MS=%~1

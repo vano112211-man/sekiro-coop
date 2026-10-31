@@ -2044,6 +2044,10 @@ static DP_SEND_TYPES: Mutex<[u64; 8]> = Mutex::new([0; 8]);
 static DP_RECV_CALLS: AtomicU64 = AtomicU64::new(0);
 static DP_RECV_GIVEN: AtomicU64 = AtomicU64::new(0);
 static DP_GAVE_TYPE1: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `SEKIRO_COOP_DP_T_GATE=0` turns off the "manipulator ran since the last
+/// packet" check in dp_fake_recv.
+static DP_T_GATE: Lazy<bool> = Lazy::new(|| std::env::var("SEKIRO_COOP_DP_T_GATE").map(|v| v != "0").unwrap_or(true));
+static DP_T_GATED: AtomicU64 = AtomicU64::new(0);
 /// Run 66: a remote player is placed from type-1 positions (~15/s), so the clone
 /// moves in 15 Hz steps. `SEKIRO_COOP_DP_SMOOTH=1`: between real packets, hand
 /// the clone the latest packet once per update with its position (f32 x,y,z at
@@ -2062,7 +2066,10 @@ static DP_SMOOTH_SYNTH: AtomicU64 = AtomicU64::new(0);
 /// packet height: it snapped every frame. Synthetic packets go out at most
 /// every `SEKIRO_COOP_DP_SMOOTH_MS` (33, i.e. 30/s, snap only above 0.66 m).
 static DP_SMOOTH_MS: Lazy<f32> = Lazy::new(|| {
-    std::env::var("SEKIRO_COOP_DP_SMOOTH_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(33.0)
+    // Runs 93-99: with the T gate (default) and the gap-aware render delay,
+    // one synthetic packet per manipulator update (1 ms) was smoothest at
+    // both 38 and 60 fps (0 lunges); the old 33 ms cadence lunged at 38 fps.
+    std::env::var("SEKIRO_COOP_DP_SMOOTH_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0)
 });
 static DP_SMOOTH_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// The NetworkManipulator moves toward a packet at delta / (T * 1.2), i.e. 20%
@@ -2148,8 +2155,17 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
 
 /// out = {u8* buf, u32 cap, u32 size}; desc = {u8* buf, u32 cap}. Hands out
 /// the oldest due packet of the requested type only.
+/// Test knob: `SEKIRO_COOP_BOT_FRAME_SLEEP_MS` sleeps that long once a frame
+/// (first type-1 receive call) while the bot runs, to reproduce the low
+/// frame rates (32-49 fps) of the runs with many clone jumps.
+static BOT_FRAME_SLEEP_MS: Lazy<u64> =
+    Lazy::new(|| std::env::var("SEKIRO_COOP_BOT_FRAME_SLEEP_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+
 unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const u64, ty: u32) -> *mut u64 {
     DP_RECV_CALLS.fetch_add(1, Ordering::Relaxed);
+    if ty == 1 && *BOT_FRAME_SLEEP_MS > 0 && !DP_GAVE_TYPE1.load(Ordering::Relaxed) && bot_elapsed().is_some() && !BOT_DONE.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(*BOT_FRAME_SLEEP_MS));
+    }
     if ty == 1 {
         bot_sample();
     }
@@ -2186,10 +2202,51 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
         } else {
             std::time::Duration::ZERO
         };
-        let i = q.iter().position(|(due, t, _, _)| *t == ty && *due + hold <= now);
-        i.and_then(|i| q.remove(i)).map(|(_, _, b, ms)| (b, ms))
+        // Run 100 (38 fps against a 60 fps sender): taking one type-1
+        // packet per frame let the inbox back up, packets reached the jitter
+        // buffer late and the render delay climbed to its 600 ms cap. With
+        // smoothing, every waiting type-1 packet goes into the buffer now;
+        // the clone still gets one synthetic packet per update.
+        if ty == 1 && *DP_SMOOTH {
+            let mut older = Vec::new();
+            while let Some(i) = q.iter().position(|(due, t, _, _)| *t == 1 && *due <= now) {
+                if let Some((_, _, b, ms)) = q.remove(i) {
+                    older.push((b, ms));
+                }
+            }
+            let last = older.pop();
+            for p in older {
+                let _ = dp_smooth_next(Some(p), now, Some(false));
+            }
+            last
+        } else {
+            let i = q.iter().position(|(due, t, _, _)| *t == ty && *due + hold <= now);
+            i.and_then(|i| q.remove(i)).map(|(_, _, b, ms)| (b, ms))
+        }
     };
-    let pkt = if ty == 1 && *DP_SMOOTH { dp_smooth_next(pkt, now) } else { pkt.map(|(b, _)| b) };
+    // Runs 85-92: clone jumps go with a low frame rate (32-49 fps: 42-94
+    // jumps a minute; 57-59 fps: 1-3). The 33 ms wall-clock cadence then
+    // hands packets 1 or 2 frames apart; the manipulator sets its speed from
+    // the previous interval, falls behind on a short one and snaps on the
+    // next. With the T gate a synthetic packet goes out when the game's own
+    // time since the last packet (manip+0x3cc) reached DP_SMOOTH_MS.
+    let t_ok = if ty == 1 && *DP_T_GATE && DP_PKT_SEQ.load(Ordering::Relaxed) > 0 {
+        let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
+        let base = MODULE_BASE.load(Ordering::Relaxed);
+        read_ptr(clone + 0x58)
+            .filter(|&m| clone != 0 && read_checked::<usize>(m) == Some(base + 0x29d4530))
+            .and_then(|m| read_checked::<f32>(m + 0x3cc))
+            .map(|t| {
+                let ok = t > 0.0 && t * 1000.0 >= *DP_SMOOTH_MS - 1.0;
+                if !ok {
+                    DP_T_GATED.fetch_add(1, Ordering::Relaxed);
+                }
+                ok
+            })
+    } else {
+        None
+    };
+    let pkt = if ty == 1 && *DP_SMOOTH { dp_smooth_next(pkt, now, t_ok) } else { pkt.map(|(b, _)| b) };
     let pkt = match pkt {
         Some(p) if ty == 1 && *DP_LEAD > 1.0 => Some(dp_lead(p)),
         other => other,
@@ -2240,6 +2297,7 @@ static DP_BUF_DELAY: Lazy<f32> = Lazy::new(|| {
 static DP_SMOOTH_HELD: AtomicU64 = AtomicU64::new(0);
 static DP_OFFS: Mutex<std::collections::VecDeque<i64>> = Mutex::new(std::collections::VecDeque::new());
 static DP_RENDER_DELAY: Mutex<f32> = Mutex::new(0.0);
+static DP_GAP90_MS: AtomicU64 = AtomicU64::new(0);
 static DP_KEEP_Y: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_KEEP_Y").map(|v| v != "0").unwrap_or(true)
 });
@@ -2247,7 +2305,7 @@ static DP_SYNC_OTHERS: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_SYNC_OTHERS").map(|v| v != "0").unwrap_or(true)
 });
 
-fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Option<Vec<u8>> {
+fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant, t_ok: Option<bool>) -> Option<Vec<u8>> {
     if let Some((r, sender_ms)) = real {
         let Some(p) = dp_pos_of(&r) else { return Some(r) };
         // Time the sample by the sender's clock mapped onto ours.
@@ -2272,14 +2330,18 @@ fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Opti
         // Keep the history ordered by time (late packets inserted in place).
         let pos_i = h.iter().position(|e| e.0 > at).unwrap_or(h.len());
         h.insert(pos_i, (at, p));
-        while h.len() > 32 {
+        while h.len() > 64 {
             h.pop_front();
         }
         *DP_SMOOTH_CUR.lock() = Some((now, r));
     }
     {
         let mut last = DP_SMOOTH_LAST.lock();
-        if last.map(|t| now.duration_since(t).as_secs_f32() * 1000.0 < *DP_SMOOTH_MS).unwrap_or(false) {
+        let wait = match t_ok {
+            Some(ok) => !ok,
+            None => last.map(|t| now.duration_since(t).as_secs_f32() * 1000.0 < *DP_SMOOTH_MS).unwrap_or(false),
+        };
+        if wait {
             return None;
         }
         *last = Some(now);
@@ -2301,7 +2363,28 @@ fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Opti
         let mut v: Vec<i64> = r.iter().map(|o| o - m).collect();
         v.sort_unstable();
         let p90 = v.get(v.len() * 9 / 10).copied().unwrap_or(0) as f32 / 1000.0;
-        (p90 + 0.04).clamp(*DP_BUF_DELAY, 0.6)
+        // Run 98: the buffer was dry 12% of the time. The jitter p90 alone
+        // ignores the spacing of the sender's samples (~70-270 ms in the
+        // traces): rendering needs a sample after the render time, so wait
+        // for the usual gap as well.
+        let gap90 = {
+            let mut g: Vec<f32> = h
+                .iter()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .map(|w| w[1].0.duration_since(w[0].0).as_secs_f32())
+                .collect();
+            g.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            g.get(g.len() * 9 / 10).copied().unwrap_or(0.0)
+        };
+        DP_GAP90_MS.store((gap90 * 1000.0) as u64, Ordering::Relaxed);
+        let want = (p90 + gap90 + 0.02).clamp(*DP_BUF_DELAY, 0.6);
+        // Run 97: the smoothed target still jumped 0.5 m in a frame. The
+        // p90 above moves in steps as packets enter and leave the window,
+        // and every step shifts the render time (50 ms = 0.3 m at a run).
+        // Let the delay change by at most 2 ms per synthetic packet.
+        let prev = *DP_RENDER_DELAY.lock();
+        if prev <= 0.0 { want } else { prev + (want - prev).clamp(-0.002, 0.002) }
     };
     *DP_RENDER_DELAY.lock() = delay;
     let render = now.checked_sub(std::time::Duration::from_secs_f32(delay))?;
@@ -2314,6 +2397,13 @@ fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Opti
             let f = (render.duration_since(a.0).as_secs_f32() / span).clamp(0.0, 1.0);
             pos = [a.1[0] + (b.1[0] - a.1[0]) * f, a.1[1] + (b.1[1] - a.1[1]) * f, a.1[2] + (b.1[2] - a.1[2]) * f];
             held = false;
+            if *DP_TRACE && !DP_TRACE_DONE.load(Ordering::Relaxed) && DP_TRACE_START.lock().is_some() {
+                let ms = |t: std::time::Instant| t.duration_since(*DP_T0).as_millis() as i64;
+                DP_TRACE_BUF.lock().push(format!(
+                    "smooth now={} render={} a={}({:.2},{:.2}) b={}({:.2},{:.2}) f={:.2} out=({:.2},{:.2}) n={}",
+                    ms(now), ms(render), ms(a.0), a.1[0], a.1[2], ms(b.0), b.1[0], b.1[2], f, pos[0], pos[2], h.len()
+                ));
+            }
             break;
         }
     }
@@ -4158,6 +4248,12 @@ fn bot_report() {
         smooth_ms = *DP_SMOOTH_MS,
         buf_delay_ms = *DP_BUF_DELAY * 1000.0,
         render_delay_ms = *DP_RENDER_DELAY.lock() * 1000.0,
+        t_gate = *DP_T_GATE,
+        frame_sleep_ms = *BOT_FRAME_SLEEP_MS,
+        t_gated = DP_T_GATED.load(Ordering::Relaxed),
+        held = DP_SMOOTH_HELD.load(Ordering::Relaxed),
+        gap90_ms = DP_GAP90_MS.load(Ordering::Relaxed),
+        synth = DP_SMOOTH_SYNTH.load(Ordering::Relaxed),
         "bot: summary"
     );
     // Context of the first 12 clone jumps: the 3 samples before and the jump.
@@ -4181,6 +4277,42 @@ fn bot_report() {
     }
     tracing::info!("bot: {}", bot_stats("hero ", &hs));
     tracing::info!("bot: {}", bot_stats("clone", &cs));
+    // Runs 93-95 (30-38 fps): the receive hook runs twice a frame and the
+    // clone moves only between some of those calls, so per-sample steps of
+    // 0.4 m are ordinary there. Frame-rate independent measure: displacement
+    // over 100 ms windows; a "lunge" is > 1.2 m in 100 ms (12 m/s, faster
+    // than the Hero runs), counted once per window.
+    let win = |who: usize| -> (Vec<f32>, u32) {
+        let mut speeds = Vec::new();
+        let mut lunges = 0u32;
+        let mut j = 0usize;
+        let mut next_ok = 0.0f32;
+        for i in 0..v.len() {
+            while j < i && v[i].0 - v[j + 1].0 >= 0.1 {
+                j += 1;
+            }
+            let dt = v[i].0 - v[j].0;
+            if dt < 0.1 || dt > 0.2 || bot_vector(v[i].0).is_none() || bot_vector(v[j].0).is_none() {
+                continue;
+            }
+            let (a, b) = if who == 0 { (v[j].1, v[i].1) } else { (v[j].2, v[i].2) };
+            let d = dist([a[0], 0.0, a[2]], [b[0], 0.0, b[2]]);
+            speeds.push(d / dt);
+            if d > 1.2 && v[i].0 >= next_ok {
+                lunges += 1;
+                next_ok = v[i].0 + 0.1;
+            }
+        }
+        speeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        (speeds, lunges)
+    };
+    let pct = |s: &Vec<f32>, p: usize| s.get(s.len() * p / 100).copied().unwrap_or(0.0);
+    let (cw, cl) = win(0);
+    let (hw, hl) = win(1);
+    tracing::info!(
+        "bot: 100ms-window: hero speed p50={:.2} p95={:.2} lunges={hl} | clone speed p50={:.2} p95={:.2} lunges={cl}",
+        pct(&hw, 50), pct(&hw, 95), pct(&cw, 50), pct(&cw, 95)
+    );
     tracing::info!("bot: done");
 }
 
