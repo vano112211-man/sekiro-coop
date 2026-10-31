@@ -3028,7 +3028,14 @@ fn enemy_puppet_step() {
             }
             make(na);
             RawPtr(na + 0x340).write::<u32>(id as u32);
-            RawPtr(c + 0x58).write::<usize>(na);
+            // Run 84: chr+0x58 alone did nothing. ChrCtrl's update (0x7ded90)
+            // takes the manipulator from ctrl+0x358 (an override) or else
+            // ctrl+0x120 (ctrl = chr+0x50). Use the override; clearing it
+            // gives the enemy back its own AI.
+            let Some(ctrl) = read_ptr(c + 0x50) else { return };
+            let prev = read_checked::<usize>(ctrl + 0x358);
+            RawPtr(ctrl + 0x358).write::<usize>(na);
+            tracing::info!(ctrl = format!("{ctrl:#x}"), prev_override = ?prev.map(|v| format!("{v:#x}")), main = ?read_checked::<usize>(ctrl + 0x120).map(|v| format!("{v:#x}")), "enemy puppet: ChrCtrl manipulator override set");
             tracing::info!(
                 chr = format!("{c:#x}"),
                 chr_id = ?read_checked::<u32>(c + 0x68),
