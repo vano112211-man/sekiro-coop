@@ -2623,9 +2623,15 @@ pub fn dp_note_remote(ty: u32, bytes: Vec<u8>, sender_ms: u64) {
 /// the copy is never freed), so its equipment and face can be set from the
 /// other player's without touching the Hero. The Hero's ChrAsm ids and face
 /// go out once a second as PacketBody::Appearance.
-static CLONE_OWN_PGD: Lazy<bool> = Lazy::new(|| {
-    std::env::var("SEKIRO_COOP_CLONE_OWN_PGD").map(|v| v == "1").unwrap_or(false)
+/// "1": a rebased copy of the Hero's PGD (bot runs 78-80: the clone then
+/// stops moving by itself). "2": a fresh PGD made by the game's own allocator
+/// and ctor, as ReplayGhostIns does (0x19de730(0xa10, 8, [0x3d9ce70]),
+/// 0x7bfe80(pgd, 0, -1)), with the Hero's PlayerInfo, ChrAsm ids and face
+/// copied in.
+static CLONE_OWN_PGD_MODE: Lazy<u8> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_CLONE_OWN_PGD").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
 });
+static CLONE_OWN_PGD: Lazy<bool> = Lazy::new(|| *CLONE_OWN_PGD_MODE != 0);
 const RVA_PGD_VT: usize = 0x29cc9a0;
 const PGD_SIZE: usize = 0xa10;
 const PGD_CHRASM_IDS: (usize, usize) = (0x278 + 0x98 + 0x24, 0x278 + 0x98 + 0xa0);
@@ -2634,6 +2640,68 @@ static CLONE_PGD: AtomicUsize = AtomicUsize::new(0);
 static APPEAR_LAST_SEND: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static APPEAR_LAST_RX: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 static APPEAR_APPLIED: AtomicU64 = AtomicU64::new(0);
+
+/// Layout used below (inventory per the public fromsoftware-rs `sekiro`
+/// crate's struct order, checked at run time): PGD+0x3e0 EquipInventoryData,
+/// +0x3f0 InventoryItemsData { +0x8 normal head, +0x10 normal count, +0x18 key
+/// head, +0x20 key count }, entries of 0x10 bytes { gaitem handle, item id,
+/// quantity, _ }. ChrAsm slots hold gaitem handles.
+const PGD_INV_NORMAL: (usize, usize) = (0x3f8, 0x400);
+const PGD_INV_KEY: (usize, usize) = (0x408, 0x410);
+const PGD_PLAYER_INFO: (usize, usize) = (0x10, 0x190);
+
+/// (handle, item id) pairs of a PGD's inventory.
+unsafe fn pgd_inventory(pgd: usize) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for (head, count) in [PGD_INV_NORMAL, PGD_INV_KEY] {
+        let Some(h) = read_ptr(pgd + head) else { continue };
+        let n = read_checked::<u32>(pgd + count).unwrap_or(0).min(4096) as usize;
+        // The array is not dense: scan a little past the count.
+        let scan = (n + 64).min(4096);
+        if !readable(h, scan * 0x10) {
+            continue;
+        }
+        for i in 0..scan {
+            let e = h + i * 0x10;
+            let handle = *(e as *const u32);
+            let id = *((e + 4) as *const u32);
+            if handle != 0 && handle != u32::MAX && id != u32::MAX {
+                out.push((handle, id));
+            }
+        }
+    }
+    out
+}
+
+unsafe fn pgd_fresh(hero_pgd: usize) -> Option<usize> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    if read_checked::<usize>(hero_pgd) != Some(base + RVA_PGD_VT) || !readable(hero_pgd, PGD_SIZE) {
+        return None;
+    }
+    let alloc_fn = base + 0x19de730;
+    let ctor = base + 0x7bfe80;
+    let ok = readable(alloc_fn, 6)
+        && core::slice::from_raw_parts(alloc_fn as *const u8, 6) == [0x49, 0x8b, 0x00, 0x4d, 0x8b, 0xc8]
+        && readable(ctor, 5)
+        && core::slice::from_raw_parts(ctor as *const u8, 5) == [0x44, 0x89, 0x44, 0x24, 0x18];
+    let allocator = read_ptr(base + 0x3d9ce70)?;
+    if !ok {
+        tracing::warn!("own pgd: allocator or ctor bytes differ, not creating");
+        return None;
+    }
+    let alloc: unsafe extern "system" fn(usize, u32, usize) -> usize = core::mem::transmute(alloc_fn);
+    let make: unsafe extern "system" fn(usize, u8, i32) -> usize = core::mem::transmute(ctor);
+    let p = alloc(PGD_SIZE, 8, allocator);
+    if p == 0 {
+        return None;
+    }
+    make(p, 0, -1);
+    for (a, b) in [PGD_PLAYER_INFO, PGD_CHRASM_IDS, PGD_FACE] {
+        core::ptr::copy_nonoverlapping((hero_pgd + a) as *const u8, (p + a) as *mut u8, b - a);
+    }
+    tracing::info!(new = format!("{p:#x}"), vt_ok = read_checked::<usize>(p) == Some(base + RVA_PGD_VT), "own pgd: fresh PlayerGameData made by the game for the clone");
+    Some(p)
+}
 
 /// A rebased copy of the Hero's PGD, or None.
 unsafe fn pgd_copy(hero_pgd: usize) -> Option<usize> {
@@ -2675,9 +2743,25 @@ pub fn hero_appearance() -> Option<Vec<u8>> {
         if read_checked::<usize>(pgd) != Some(base + RVA_PGD_VT) || !readable(pgd, PGD_SIZE) {
             return None;
         }
+        // ChrAsm holds this game's item handles; send item ids instead
+        // (0 where the handle is not in the inventory).
+        let inv = pgd_inventory(pgd);
         let mut v = Vec::new();
-        for (a, b) in [PGD_CHRASM_IDS, PGD_FACE] {
-            v.extend_from_slice(core::slice::from_raw_parts((pgd + a) as *const u8, b - a));
+        let n = (PGD_CHRASM_IDS.1 - PGD_CHRASM_IDS.0) / 4;
+        let mut found = 0;
+        for k in 0..n {
+            let h = *((pgd + PGD_CHRASM_IDS.0 + 4 * k) as *const u32);
+            let id = inv.iter().find(|(eh, _)| *eh == h && h != 0).map(|e| e.1);
+            if id.is_some() {
+                found += 1;
+            }
+            v.extend_from_slice(&id.unwrap_or(0).to_le_bytes());
+        }
+        v.extend_from_slice(core::slice::from_raw_parts((pgd + PGD_FACE.0) as *const u8, PGD_FACE.1 - PGD_FACE.0));
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            let ids: Vec<String> = v[..n * 4].chunks(4).map(|c| format!("{:#x}", u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect();
+            tracing::info!(inventory = inv.len(), slots_found = found, ?ids, "own pgd: Hero equipment as item ids");
         }
         Some(v)
     }
@@ -2700,16 +2784,32 @@ pub fn note_remote_appearance(bytes: Vec<u8>) {
         }
         *last = Some(bytes.clone());
     }
+    let slots = (PGD_CHRASM_IDS.1 - PGD_CHRASM_IDS.0) / 4;
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let mut mapped = 0;
+    let mut missing = Vec::new();
     unsafe {
-        let mut off = 0;
-        for (a, b) in [PGD_CHRASM_IDS, PGD_FACE] {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr().add(off), (pgd + a) as *mut u8, b - a);
-            off += b - a;
+        // Our own Hero's inventory: item id -> our handle.
+        let hero_pgd = read_ptr(base + RVA_GAME_DATA_MAN).and_then(|g| read_ptr(g + 0x08)).unwrap_or(0);
+        let inv = if hero_pgd != 0 { pgd_inventory(hero_pgd) } else { Vec::new() };
+        for k in 0..slots {
+            let c = &bytes[4 * k..4 * k + 4];
+            let id = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            if id == 0 {
+                continue; // unknown on the sender: keep the clone's slot
+            }
+            match inv.iter().find(|e| e.1 == id) {
+                Some((h, _)) => {
+                    *((pgd + PGD_CHRASM_IDS.0 + 4 * k) as *mut u32) = *h;
+                    mapped += 1;
+                }
+                None => missing.push(format!("{id:#x}")),
+            }
         }
+        core::ptr::copy_nonoverlapping(bytes.as_ptr().add(slots * 4), (pgd + PGD_FACE.0) as *mut u8, PGD_FACE.1 - PGD_FACE.0);
     }
     let n = APPEAR_APPLIED.fetch_add(1, Ordering::Relaxed);
-    let ids: Vec<u32> = bytes[..100].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    tracing::info!(n, ?ids, "own pgd: remote appearance applied to the clone (ChrAsm ids)");
+    tracing::info!(n, mapped, ?missing, "own pgd: remote appearance applied to the clone (item ids mapped to our handles)");
 }
 
 // ---------------------------------------------------------------- enemy net probe
@@ -3277,7 +3377,11 @@ fn spawn_player_step() {
             return;
         };
         let kind = std::env::var("SEKIRO_COOP_NET_PLAYER_KIND").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        let clone_pgd = if *CLONE_OWN_PGD { pgd_copy(pgd) } else { None };
+        let clone_pgd = match *CLONE_OWN_PGD_MODE {
+            1 => pgd_copy(pgd),
+            2 => pgd_fresh(pgd),
+            _ => None,
+        };
         if let Some(c) = clone_pgd {
             CLONE_PGD.store(c, Ordering::Relaxed);
         }
