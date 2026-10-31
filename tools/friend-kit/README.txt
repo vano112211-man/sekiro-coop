@@ -4,7 +4,7 @@ Sekiro co-op (sekiro-coop, experimental build)
 What it is: a test build of an unofficial co-op mod for Sekiro: Shadows Die Twice
 (Steam, version 1.06). Your friend appears in your world as a Wolf, moved by the game's own remote-player code.
 Connection goes through Steam, so no IP addresses or port forwarding are needed.
-It is NOT finished: enemies and story are not shared yet. Expect bugs and crashes.
+It is NOT finished: story is not shared, enemies only experimentally (see below). Expect bugs and crashes.
 
 You need
 - Sekiro on Steam, version 1.06, Steam running and logged in.
@@ -25,6 +25,12 @@ Step 3. Play
   The host (whose world it is):  play-steam.cmd host 7656119xxxxxxxxxx
   The other player:              play-steam.cmd client 7656119xxxxxxxxxx
   (each puts the OTHER player's SteamID64)
+
+Shared enemies (experimental, off by default)
+  Both players run:  set SHARED_ENEMIES=1   and then play-steam.cmd as in step 3, in the same window.
+  The host's enemies then move the same enemies in the client's game (the client's enemies stop
+  thinking for themselves while the host is near them). Hits and deaths are not shared yet.
+  Only enemies of the same kind at the same place are taken over; the log says which.
 
 Saves
   The mod plays on a separate save file, coop.sl2, in your normal Sekiro save folder.

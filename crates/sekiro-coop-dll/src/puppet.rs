@@ -2826,8 +2826,14 @@ pub fn note_remote_appearance(bytes: Vec<u8>) {
 /// characters, log manipulator class, net id, and whether their 0x1c and
 /// 0x158 records exist and change, i.e. whether the owner side fills them
 /// offline.
-static ENEMY_PROBE: Lazy<bool> = Lazy::new(|| {
-    std::env::var("SEKIRO_COOP_ENEMY_PROBE").map(|v| v == "1").unwrap_or(false)
+static ENEMY_PROBE: Lazy<bool> = Lazy::new(|| *ENEMY_PROBE_N > 0);
+/// "1" = the 6 nearest (as before); a larger number = that many.
+static ENEMY_PROBE_N: Lazy<usize> = Lazy::new(|| {
+    match std::env::var("SEKIRO_COOP_ENEMY_PROBE").ok().and_then(|v| v.parse::<usize>().ok()) {
+        Some(1) => 6,
+        Some(n) => n,
+        None => 0,
+    }
 });
 static ENEMY_PROBE_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static ENEMY_PROBE_PREV: Mutex<Vec<(usize, Vec<u8>, Vec<u8>)>> = Mutex::new(Vec::new());
@@ -2861,7 +2867,7 @@ fn enemy_probe_step() {
         let mut rows = Vec::new();
         let mut prev = ENEMY_PROBE_PREV.lock();
         let mut next = Vec::new();
-        for (d, c) in near.into_iter().take(6) {
+        for (d, c) in near.into_iter().take(*ENEMY_PROBE_N) {
             let manip = read_ptr(c + 0x58).unwrap_or(0);
             let mvt = read_checked::<usize>(manip).map(|v| v.wrapping_sub(base)).unwrap_or(0);
             let kind = match mvt {
@@ -2903,7 +2909,12 @@ fn enemy_probe_step() {
             };
             let hex = |v: &[u8], n: usize| v.iter().take(n).map(|b| format!("{b:02x}")).collect::<String>();
             rows.push(format!(
-                "chr {c:#x} d={d:.1} chr_id={:?} manip={kind}({mvt:#x}) id={id:#06x} flags={flags:?} rec1c={} changed={sch} rec158[0..32]={} changed={bch}",
+                "chr {c:#x} d={d:.1} pos={:?} anim_words={} chr_id={:?} manip={kind}({mvt:#x}) id={id:#06x} flags={flags:?} rec1c={} changed={sch} rec158[0..32]={} changed={bch}",
+                phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)),
+                {
+                    let w = er_anim_words(c);
+                    w.split(',').skip(12).take(2).collect::<Vec<_>>().join(",")
+                },
                 read_checked::<u32>(c + 0x68),
                 hex(&small, 0x1c),
                 hex(&big, 32)
@@ -3568,7 +3579,7 @@ static ES_T0: Lazy<std::time::Instant> = Lazy::new(std::time::Instant::now);
 fn es_now_ms() -> u64 {
     ES_T0.elapsed().as_millis() as u64
 }
-static ES_OUTBOX: Mutex<Vec<(u64, u16, Vec<u8>, Option<Vec<u8>>)>> = Mutex::new(Vec::new());
+static ES_OUTBOX: Mutex<Vec<(u64, u16, u32, Vec<u8>, Option<Vec<u8>>)>> = Mutex::new(Vec::new());
 /// Host side per id: (last small sent ms, last big sent).
 static ES_SENT: Lazy<Mutex<std::collections::HashMap<u16, (u64, Vec<u8>)>>> =
     Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
@@ -3586,6 +3597,11 @@ struct EsRemote {
     bigs: std::collections::VecDeque<Vec<u8>>,
     chr: usize,
     netai: usize,
+    kind: u32,
+    /// Our clock at the last packet for this id.
+    last_rx_ms: u64,
+    /// Why we will not drive it (kind or place differ), logged once.
+    refused: Option<String>,
     rx: u64,
     small_w: u64,
     big_w: u64,
@@ -3603,14 +3619,14 @@ fn es_is_client() -> bool {
     matches!(ENEMY_SYNC.as_str(), "client" | "loop")
 }
 
-pub fn enemy_take_outbox() -> Vec<(u64, u16, Vec<u8>, Option<Vec<u8>>)> {
+pub fn enemy_take_outbox() -> Vec<(u64, u16, u32, Vec<u8>, Option<Vec<u8>>)> {
     if !es_is_host() {
         return Vec::new();
     }
     std::mem::take(&mut *ES_OUTBOX.lock())
 }
 
-pub fn enemy_note_remote(sent_ms: u64, id: u16, small: Vec<u8>, big: Option<Vec<u8>>) {
+pub fn enemy_note_remote(sent_ms: u64, id: u16, kind: u32, small: Vec<u8>, big: Option<Vec<u8>>) {
     if !es_is_client() || small.len() != 0x1c || big.as_ref().map(|b| b.len() != 0x158).unwrap_or(false) {
         return;
     }
@@ -3624,6 +3640,8 @@ pub fn enemy_note_remote(sent_ms: u64, id: u16, small: Vec<u8>, big: Option<Vec<
     let mut r = ES_REMOTE.lock();
     let e = r.entry(id).or_default();
     e.rx += 1;
+    e.kind = kind;
+    e.last_rx_ms = es_now_ms();
     e.queue.push_back((sent_ms, small, big));
     while e.queue.len() > 2000 {
         e.queue.pop_front();
@@ -3678,7 +3696,7 @@ fn enemy_sync_step() {
                 }
                 let mut sent = ES_SENT.lock();
                 let mut ob = ES_OUTBOX.lock();
-                for &(_c, id) in hl.1.iter() {
+                for &(c, id) in hl.1.iter() {
                     let Some(r) = enemy_recs(mgr, id) else { continue };
                     let small = core::slice::from_raw_parts(r.small as *const u8, 0x1c).to_vec();
                     let big = core::slice::from_raw_parts(r.big as *const u8, 0x158).to_vec();
@@ -3701,7 +3719,7 @@ fn enemy_sync_step() {
                         None
                     };
                     if ob.len() < 512 {
-                        ob.push((now, id, small, big_out));
+                        ob.push((now, id, read_checked::<u32>(c + 0x68).unwrap_or(0), small, big_out));
                     }
                     ES_FIRST_SEND.lock().get_or_insert(now);
                 }
@@ -3729,12 +3747,52 @@ fn enemy_sync_step() {
                         if e.cur_small.is_none() {
                             continue;
                         }
+                        // Still ours? An area reload frees the character.
+                        if e.netai != 0 {
+                            let alive = crate::global().map(|m| m.chrins_registry.lock().values().any(|&v| v == e.chr)).unwrap_or(false);
+                            let ctrl = if alive { read_ptr(e.chr + 0x50) } else { None };
+                            if ctrl.and_then(|c| read_checked::<usize>(c + 0x358)) != Some(e.netai) {
+                                tracing::info!(id = format!("{id:#06x}"), alive, "enemy sync: lost the enemy (reloaded?); will look for it again");
+                                e.netai = 0;
+                                e.chr = 0;
+                            }
+                        }
+                        // No records for 3 s (out of the host's range): own AI again.
+                        if e.netai != 0 && now > e.last_rx_ms + 3000 && !looping {
+                            if let Some(ctrl) = read_ptr(e.chr + 0x50) {
+                                if read_checked::<usize>(ctrl + 0x358) == Some(e.netai) {
+                                    RawPtr(ctrl + 0x358).write::<usize>(0);
+                                }
+                            }
+                            tracing::info!(id = format!("{id:#06x}"), "enemy sync: no records for 3 s, enemy gets its own AI back");
+                            e.netai = 0;
+                            e.chr = 0;
+                            e.cur_small = None;
+                            e.bigs.clear();
+                            continue;
+                        }
                         if e.netai == 0 {
+                            if e.refused.is_some() {
+                                continue;
+                            }
                             let list = es_enemies(mgr, hp, 200.0);
                             let Some(&(_, c, _)) = list.iter().find(|x| x.2 == *id) else {
                                 ids_missing.push(*id);
                                 continue;
                             };
+                            let local_kind = read_checked::<u32>(c + 0x68).unwrap_or(0);
+                            let lp = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a));
+                            let tp = e.cur_small.as_ref().map(|s| {
+                                let f = |i: usize| f32::from_le_bytes([s[i], s[i + 1], s[i + 2], s[i + 3]]);
+                                [f(0), f(4), f(8)]
+                            });
+                            let gap = lp.zip(tp).map(|(a, b)| dist(a, b)).unwrap_or(f32::MAX);
+                            if local_kind != e.kind || gap > 30.0 {
+                                let why = format!("host kind {} at {:?}, ours kind {} at {:?} ({gap:.1} m apart)", e.kind, tp, local_kind, lp);
+                                tracing::warn!(id = format!("{id:#06x}"), why = why.as_str(), "enemy sync: not the same enemy, leaving it alone");
+                                e.refused = Some(why);
+                                continue;
+                            }
                             let Some(na) = install_netai(c, *id) else { continue };
                             e.chr = c;
                             e.netai = na;

@@ -40,6 +40,11 @@ set SEKIRO_COOP_PUPPET_NOPOS=1
 set SEKIRO_COOP_NET_PLAYER_POST=1
 set SEKIRO_COOP_NET_PLAYER_TYPE=0
 set SEKIRO_COOP_DP_SESSION=1
+rem Shared enemies (experimental, stage 2): set SHARED_ENEMIES=1 before running, or edit here.
+rem The host's enemies then drive the same enemies in the client's game.
+if "%SHARED_ENEMIES%"=="" set SHARED_ENEMIES=0
+set SEKIRO_COOP_ENEMY_SYNC=
+if "%SHARED_ENEMIES%"=="1" set SEKIRO_COOP_ENEMY_SYNC=%ROLE%
 set SEKIRO_COOP_CLONE_OWN_PGD=2
 set SEKIRO_COOP_DP_LOOPBACK=
 set SEKIRO_COOP_DP_SMOOTH=1

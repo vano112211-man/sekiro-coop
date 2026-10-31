@@ -120,8 +120,10 @@ pub enum PacketBody {
     Appearance { bytes: Vec<u8> },
     /// One enemy's sync records from the host's game (stage 2): `small` is
     /// the 0x1c record (position, rotation), `big` the 0x158 behaviour
-    /// record when it changed. `sent_ms` is the sender's clock.
-    EnemyRec { sent_ms: u64, id: u16, small: Vec<u8>, big: Option<Vec<u8>> },
+    /// record when it changed. `sent_ms` is the sender's clock; `kind` the
+    /// enemy's character id (ChrIns+0x68), so the receiver only drives an
+    /// enemy of the same kind.
+    EnemyRec { sent_ms: u64, id: u16, kind: u32, small: Vec<u8>, big: Option<Vec<u8>> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
