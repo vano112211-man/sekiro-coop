@@ -2729,9 +2729,29 @@ fn bot_vector(t: f32) -> Option<[f32; 2]> {
     Some([a.sin(), a.cos()])
 }
 
+/// Where the bot started: it steers back toward a circle around this point.
+static BOT_CENTER: Mutex<Option<[f32; 3]>> = Mutex::new(None);
+
+/// Owner (2026-10-31): open-loop circles drifted, since the character runs
+/// forward faster than it turns and runs back, and ended at walls. Steer
+/// toward a point moving on a 3 m circle around the start instead.
+fn bot_steer(t: f32) -> Option<[f32; 2]> {
+    bot_vector(t)?;
+    let h = hero_pos()?;
+    let c = *BOT_CENTER.lock().get_or_insert(h);
+    let a = t * std::f32::consts::TAU / 4.0;
+    let goal = [c[0] + 3.0 * a.sin(), c[2] + 3.0 * a.cos()];
+    let (dx, dz) = (goal[0] - h[0], goal[1] - h[2]);
+    let len = (dx * dx + dz * dz).sqrt();
+    if len < 0.3 {
+        return None;
+    }
+    Some([dx / len, dz / len])
+}
+
 unsafe fn bot_write(this: usize) {
     let Some(t) = bot_elapsed() else { return };
-    if let Some([x, z]) = bot_vector(t) {
+    if let Some([x, z]) = bot_steer(t) {
         let v: [f32; 4] = [x, 0.0, z, 0.0];
         RawPtr(this + 0x10).write::<[f32; 4]>(v);
         RawPtr(this + 0xc0).write::<[f32; 4]>(v);
@@ -2863,7 +2883,7 @@ fn bot_step() {
                 return;
             }
             *st = Some(std::time::Instant::now());
-            tracing::info!("bot: start (60 s: run a 4 s circle for 10 s, stand 2 s)");
+            tracing::info!("bot: start (60 s: chase a point on a 3 m circle around the start for 10 s, stand 2 s)");
         }
     }
     if bot_elapsed().unwrap_or(0.0) >= BOT_SECS + 2.0 {
