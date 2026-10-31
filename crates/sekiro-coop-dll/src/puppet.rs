@@ -2606,7 +2606,9 @@ fn bot_vector(t: f32) -> Option<[f32; 2]> {
     if !(0.0..BOT_SECS).contains(&t) || t % 12.0 >= 10.0 {
         return None;
     }
-    let a = t * std::f32::consts::TAU / 6.0; // a full circle every 6 s
+    // A full circle every 4 s: about 3 m radius at run speed (run 75: a 5 m
+    // circle brushed a rock and the clone was dragged through it).
+    let a = t * std::f32::consts::TAU / 4.0;
     Some([a.sin(), a.cos()])
 }
 
@@ -2744,7 +2746,7 @@ fn bot_step() {
                 return;
             }
             *st = Some(std::time::Instant::now());
-            tracing::info!("bot: start (60 s: run a circle 10 s, stand 2 s)");
+            tracing::info!("bot: start (60 s: run a 4 s circle for 10 s, stand 2 s)");
         }
     }
     if bot_elapsed().unwrap_or(0.0) >= BOT_SECS + 2.0 {
