@@ -2295,7 +2295,20 @@ fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Opti
         }
     }
     if held {
-        DP_SMOOTH_HELD.fetch_add(1, Ordering::Relaxed);
+        let n = DP_SMOOTH_HELD.fetch_add(1, Ordering::Relaxed);
+        if n % 120 == 0 {
+            let ms = |t: std::time::Instant| t.duration_since(*DP_T0).as_millis() as i64;
+            tracing::info!(
+                held = n,
+                render_ms = ms(render),
+                newest_ms = h.back().map(|e| ms(e.0)),
+                oldest_ms = h.front().map(|e| ms(e.0)),
+                samples = h.len(),
+                now_ms = ms(now),
+                min_off = ?*DP_MIN_OFF.lock(),
+                "dp smooth: buffer has no sample pair around the render time"
+            );
+        }
         if let Some(first) = h.front() {
             if render < first.0 {
                 pos = first.1;
