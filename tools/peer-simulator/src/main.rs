@@ -281,6 +281,9 @@ fn main() -> ExitCode {
                 PacketBody::ManipState { bytes, .. } if mirror => {
                     manip_history.push_back((Instant::now(), bytes));
                 }
+                PacketBody::Appearance { bytes } if mirror => {
+                    let _ = session.send_unreliable(PacketType::State, &PacketBody::Appearance { bytes });
+                }
                 PacketBody::DpRegular { frame: sent, ty, bytes } if mirror => {
                     dp_history.push_back((Instant::now(), ty, bytes, sent));
                 }

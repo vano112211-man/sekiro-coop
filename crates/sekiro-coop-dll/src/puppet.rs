@@ -2584,6 +2584,110 @@ pub fn dp_note_remote(ty: u32, bytes: Vec<u8>, sender_ms: u64) {
     }
 }
 
+// ---------------------------------------------------------------- appearance
+
+/// The clone was created with the Hero's own PlayerGameData (PGD), so it
+/// wears the local player's equipment. Layout (1.06, offline RE):
+/// PGD (vt 0x29cc9a0, 0xa10 bytes, ctor 0x7bfe80): +0x278 EquipGameData
+/// (ctor 0x799670) whose +0x98 is ChrAsm (vt 0x2a1edd0, ctor 0x9cafa0:
+/// +0x24 25 x u32 equip ids, +0x88 -1, +0x90 12 flag bytes, +0x9c u32);
+/// +0x740 FaceData (vt 0x29c7440: +0x10 i32, +0x14..+0x108 face, +0x108 ptr,
+/// +0x110 owner PGD). ReplayGhostIns gives each ghost its own PGD the same way.
+///
+/// `SEKIRO_COOP_CLONE_OWN_PGD=1`: give the clone a copy of the Hero's PGD
+/// (pointers into the Hero's PGD rebased to the copy; other pointers shared,
+/// the copy is never freed), so its equipment and face can be set from the
+/// other player's without touching the Hero. The Hero's ChrAsm ids and face
+/// go out once a second as PacketBody::Appearance.
+static CLONE_OWN_PGD: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_CLONE_OWN_PGD").map(|v| v == "1").unwrap_or(false)
+});
+const RVA_PGD_VT: usize = 0x29cc9a0;
+const PGD_SIZE: usize = 0xa10;
+const PGD_CHRASM_IDS: (usize, usize) = (0x278 + 0x98 + 0x24, 0x278 + 0x98 + 0xa0);
+const PGD_FACE: (usize, usize) = (0x740 + 0x10, 0x740 + 0x108);
+static CLONE_PGD: AtomicUsize = AtomicUsize::new(0);
+static APPEAR_LAST_SEND: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static APPEAR_LAST_RX: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+static APPEAR_APPLIED: AtomicU64 = AtomicU64::new(0);
+
+/// A rebased copy of the Hero's PGD, or None.
+unsafe fn pgd_copy(hero_pgd: usize) -> Option<usize> {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    if read_checked::<usize>(hero_pgd) != Some(base + RVA_PGD_VT) || !readable(hero_pgd, PGD_SIZE) {
+        tracing::warn!("own pgd: Hero PlayerGameData not as expected, using the shared one");
+        return None;
+    }
+    let buf: &'static mut [u128] = Box::leak(vec![0u128; PGD_SIZE / 16 + 1].into_boxed_slice());
+    let new = buf.as_mut_ptr() as usize;
+    core::ptr::copy_nonoverlapping(hero_pgd as *const u8, new as *mut u8, PGD_SIZE);
+    let mut rebased = 0;
+    for off in (0..PGD_SIZE).step_by(8) {
+        let v = *((new + off) as *const usize);
+        if v >= hero_pgd && v < hero_pgd + PGD_SIZE {
+            *((new + off) as *mut usize) = v - hero_pgd + new;
+            rebased += 1;
+        }
+    }
+    tracing::info!(new = format!("{new:#x}"), rebased, "own pgd: clone gets a copy of the Hero's PlayerGameData");
+    Some(new)
+}
+
+/// The Hero's appearance bytes: ChrAsm ids, then face.
+pub fn hero_appearance() -> Option<Vec<u8>> {
+    if !*CLONE_OWN_PGD {
+        return None;
+    }
+    {
+        let mut l = APPEAR_LAST_SEND.lock();
+        if l.map(|t| t.elapsed() < std::time::Duration::from_secs(1)).unwrap_or(false) {
+            return None;
+        }
+        *l = Some(std::time::Instant::now());
+    }
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    unsafe {
+        let pgd = read_ptr(base + RVA_GAME_DATA_MAN).and_then(|g| read_ptr(g + 0x08))?;
+        if read_checked::<usize>(pgd) != Some(base + RVA_PGD_VT) || !readable(pgd, PGD_SIZE) {
+            return None;
+        }
+        let mut v = Vec::new();
+        for (a, b) in [PGD_CHRASM_IDS, PGD_FACE] {
+            v.extend_from_slice(core::slice::from_raw_parts((pgd + a) as *const u8, b - a));
+        }
+        Some(v)
+    }
+}
+
+/// The other player's appearance: write it into the clone's own PGD.
+pub fn note_remote_appearance(bytes: Vec<u8>) {
+    let want = (PGD_CHRASM_IDS.1 - PGD_CHRASM_IDS.0) + (PGD_FACE.1 - PGD_FACE.0);
+    if bytes.len() != want {
+        return;
+    }
+    let pgd = CLONE_PGD.load(Ordering::Relaxed);
+    if pgd == 0 {
+        return;
+    }
+    {
+        let mut last = APPEAR_LAST_RX.lock();
+        if last.as_deref() == Some(&bytes[..]) {
+            return;
+        }
+        *last = Some(bytes.clone());
+    }
+    unsafe {
+        let mut off = 0;
+        for (a, b) in [PGD_CHRASM_IDS, PGD_FACE] {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr().add(off), (pgd + a) as *mut u8, b - a);
+            off += b - a;
+        }
+    }
+    let n = APPEAR_APPLIED.fetch_add(1, Ordering::Relaxed);
+    let ids: Vec<u32> = bytes[..100].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    tracing::info!(n, ?ids, "own pgd: remote appearance applied to the clone (ChrAsm ids)");
+}
+
 // ---------------------------------------------------------------- test bot
 
 /// In-game test bot (coop-anything rule 11: test with bots, not people).
@@ -3022,10 +3126,14 @@ fn spawn_player_step() {
             return;
         };
         let kind = std::env::var("SEKIRO_COOP_NET_PLAYER_KIND").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let clone_pgd = if *CLONE_OWN_PGD { pgd_copy(pgd) } else { None };
+        if let Some(c) = clone_pgd {
+            CLONE_PGD.store(c, Ordering::Relaxed);
+        }
         let ptr = {
             let mut d = NET_PLAYER_DATA.lock();
             d[0] = 1 | (kind << 32); // id 1, manipulator kind
-            d[1] = pgd as u64;
+            d[1] = clone_pgd.unwrap_or(pgd) as u64;
             d[2] = 0;
             d[3] = obj21f8 as u64;
             d[4] = v2260.unwrap_or(0) as u64;

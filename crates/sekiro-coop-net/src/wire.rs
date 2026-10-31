@@ -115,6 +115,9 @@ pub enum PacketBody {
     /// size, ty)`; ty 1 = DP_REGULAR from 0x8da080, 7 also seen); the receiver
     /// gives it back to its clone's session `Receive` for the same type.
     DpRegular { frame: u64, ty: u32, bytes: Vec<u8> },
+    /// The sender's ChrAsm equip ids and face (PlayerGameData copies), so
+    /// the receiver's clone can look like the sender.
+    Appearance { bytes: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
