@@ -3183,6 +3183,115 @@ fn enemy_puppet_step() {
     }
 }
 
+// ---------------------------------------------------------------- enemy registry
+
+/// Run 106 (owner put the save next to fighting enemies): none of them was
+/// in `chrins_registry`, which only learns characters from the ApplyEffect
+/// hook. Every enemy with its own AI goes through ComManipulator vt[11]
+/// (0x7e54f0, this = manipulator, rdx = ChrCtrl, ChrCtrl+0x10 = ChrIns)
+/// once a frame, so hook it and register the character by handle.
+const RVA_COM_MANIP_UPDATE: usize = 0x7e54f0;
+static COM_UPD_ORIG: AtomicUsize = AtomicUsize::new(0);
+static COM_UPD_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COM_UPD_NEW: AtomicU64 = AtomicU64::new(0);
+
+unsafe extern "system" fn com_manip_update_detour(this: usize, ctrl: usize, a3: usize, a4: usize) -> usize {
+    // Run 107: keep this cheap, it runs for every enemy every frame. The
+    // game hands us a live ChrCtrl, so plain reads; the registry is only
+    // locked for characters not seen before (a small seen-set first).
+    let chr = if ctrl >= 0x10000 { *((ctrl + 0x10) as *const usize) } else { 0 };
+    if chr >= 0x10000 {
+        let new = COM_SEEN.try_lock().map(|mut s| s.insert(chr)).unwrap_or(false);
+        if new {
+            let h = *((chr + 0x08) as *const u32);
+            if h != 0 {
+                if let Some(m) = crate::global() {
+                    m.chrins_registry.lock().insert(h, chr);
+                    COM_UPD_NEW.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    // The hook goes live inside create_hook, a moment before the
+    // trampoline address is stored.
+    let mut o = COM_UPD_ORIG.load(Ordering::Acquire);
+    while o == 0 {
+        core::hint::spin_loop();
+        o = COM_UPD_ORIG.load(Ordering::Acquire);
+    }
+    let orig: unsafe extern "system" fn(usize, usize, usize, usize) -> usize = core::mem::transmute(o);
+    let r = orig(this, ctrl, a3, a4);
+    // The records are fresh now: let the replay test tape them per frame.
+    if chr != 0 && chr == ER_REC_CHR.load(Ordering::Relaxed) {
+        er_tape_frame();
+    }
+    r
+}
+
+/// Characters already registered by the detour (cleared on reload by size).
+static COM_SEEN: Lazy<Mutex<std::collections::HashSet<usize>>> = Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
+
+// NetAIManipulator update (0x7ea5c0: rcx = this, xmm1 = dt, r8 = ChrCtrl):
+// the replay test feeds the records right before it reads them, per frame.
+const RVA_NETAI_UPDATE: usize = 0x7ea5c0;
+static NETAI_UPD_ORIG: AtomicUsize = AtomicUsize::new(0);
+static NETAI_UPD_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+unsafe extern "system" fn netai_update_detour(this: usize, dt: f32, ctrl: usize, a4: usize) -> usize {
+    if this != 0 && this == ER_NETAI.load(Ordering::Relaxed) {
+        er_play_frame();
+    }
+    let mut o = NETAI_UPD_ORIG.load(Ordering::Acquire);
+    while o == 0 {
+        core::hint::spin_loop();
+        o = NETAI_UPD_ORIG.load(Ordering::Acquire);
+    }
+    let orig: unsafe extern "system" fn(usize, f32, usize, usize) -> usize = core::mem::transmute(o);
+    orig(this, dt, ctrl, a4)
+}
+
+fn netai_hook_install() {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    if base == 0 || NETAI_UPD_TRIED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let target = base + RVA_NETAI_UPDATE;
+    let expect: [u8; 14] = [0x48, 0x8b, 0xc4, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57];
+    let ok = readable(target, expect.len()) && unsafe { core::slice::from_raw_parts(target as *const u8, expect.len()) } == expect;
+    if !ok {
+        tracing::warn!("NetAI update bytes differ, not hooking");
+        return;
+    }
+    match sekiro_sdk_core::hook::create_hook(target, netai_update_detour as usize) {
+        Ok((_h, tramp)) => {
+            NETAI_UPD_ORIG.store(tramp as usize, Ordering::Release);
+            tracing::info!("NetAI update hooked (records fed per frame)");
+        }
+        Err(e) => tracing::warn!(err = %e, "NetAI update hook failed"),
+    }
+}
+
+fn com_manip_hook_step() {
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    if base == 0 || COM_UPD_TRIED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let target = base + RVA_COM_MANIP_UPDATE;
+    let expect: [u8; 12] = [0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57];
+    let ok = readable(target, expect.len()) && unsafe { core::slice::from_raw_parts(target as *const u8, expect.len()) } == expect;
+    if !ok {
+        tracing::warn!("enemy registry: ComManipulator update bytes differ, not hooking");
+        return;
+    }
+    match sekiro_sdk_core::hook::create_hook(target, com_manip_update_detour as usize) {
+        Ok((_h, tramp)) => {
+            COM_UPD_ORIG.store(tramp as usize, Ordering::Release);
+            tracing::info!("enemy registry: ComManipulator update hooked, enemies register themselves");
+        }
+        Err(e) => tracing::warn!(err = %e, "enemy registry: hook failed"),
+    }
+}
+
 // ---------------------------------------------------------------- enemy mirror (stage 2 test)
 
 /// Offline RE (2026-10-31), derived: on the owner side ComManipulator vt[11]
@@ -3493,6 +3602,79 @@ fn er_click(_near: bool) {}
 #[cfg(not(windows))]
 fn er_click_release() {}
 
+/// Enemy chosen for the replay test while recording (0 = none): the
+/// ComManipulator detour tapes its records every frame.
+static ER_REC_CHR: AtomicUsize = AtomicUsize::new(0);
+/// Recent positions of nearby enemies, to pick one that moves (run 107
+/// picked an enemy that stood still).
+static ER_POSHIST: Lazy<Mutex<std::collections::HashMap<usize, std::collections::VecDeque<(std::time::Instant, [f32; 3])>>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Called from the ComManipulator detour right after the enemy's own update.
+fn er_tape_frame() {
+    let Some((c, r, ts)) = *ER_TARGET.lock() else { return };
+    let _ = c;
+    let t = ts.elapsed().as_secs_f32();
+    if t >= ER_REC_SECS {
+        ER_REC_CHR.store(0, Ordering::Relaxed);
+        return;
+    }
+    unsafe {
+        let small: [u8; 0x1c] = RawPtr(r.small).read::<[u8; 0x1c]>();
+        let big = core::slice::from_raw_parts(r.big as *const u8, 0x158).to_vec();
+        let f = *(r.flags as *const u16);
+        let mut last = ER_LAST_BIG.lock();
+        let fresh = f & 8 != 0 || *last != big;
+        if f & 8 != 0 {
+            *(r.flags as *mut u16) = f & !8;
+        }
+        if fresh {
+            *last = big.clone();
+        }
+        ER_TAPE.lock().push((t, small, fresh.then_some(big)));
+    }
+}
+
+/// Called from the NetAI detour right before NetAI reads the records.
+fn er_play_frame() {
+    let Some((_c, r, ts)) = *ER_TARGET.lock() else { return };
+    let tr = ts.elapsed().as_secs_f32() - ER_REC_SECS;
+    if tr < 0.0 || tr > ER_REC_SECS + 2.0 {
+        return;
+    }
+    let tape = ER_TAPE.lock();
+    unsafe {
+        let f = *(r.flags as *const u16);
+        let mut nf = f;
+        if f & 1 == 0 {
+            if let Some(e) = tape.iter().rev().find(|e| e.0 <= tr) {
+                RawPtr(r.small).write::<[u8; 0x1c]>(e.1);
+                nf = (nf & !0x100) | 1;
+                ER_SMALL_W.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if f & 4 == 0 {
+            let mut cur = ER_BIG_CURSOR.load(Ordering::Relaxed);
+            while cur < tape.len() && tape[cur].2.is_none() {
+                cur += 1;
+            }
+            if cur < tape.len() && tape[cur].0 <= tr {
+                let big = tape[cur].2.as_ref().unwrap();
+                core::ptr::copy_nonoverlapping(big.as_ptr(), r.big as *mut u8, 0x158);
+                nf |= 4;
+                ER_BIG_W.fetch_add(1, Ordering::Relaxed);
+                cur += 1;
+            }
+            ER_BIG_CURSOR.store(cur, Ordering::Relaxed);
+        } else {
+            ER_BIG_SKIPPED.fetch_add(1, Ordering::Relaxed);
+        }
+        if nf != f {
+            *(r.flags as *mut u16) = nf;
+        }
+    }
+}
+
 fn enemy_replay_step() {
     if !*ENEMY_REPLAY || ER_DONE.load(Ordering::Relaxed) {
         return;
@@ -3500,33 +3682,49 @@ fn enemy_replay_step() {
     let Some(hp) = hero_pos() else { return };
     let now = std::time::Instant::now();
     let t0 = *ER_T0.lock().get_or_insert(now);
-    if t0.elapsed().as_secs_f32() < 12.0 {
-        return;
-    }
+    let since = t0.elapsed().as_secs_f32();
     let base = MODULE_BASE.load(Ordering::Relaxed);
     unsafe {
         let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) else { return };
         let Some(mgr) = read_ptr(wcm + 0x630) else { return };
         let mut tgt = ER_TARGET.lock();
         if tgt.is_none() {
+            // Track nearby enemies' positions, pick one that moves.
             let Some(m) = crate::global() else { return };
             let chrs: Vec<usize> = m.chrins_registry.lock().values().copied().collect();
-            let mut best: Option<(f32, usize, u16, [f32; 3])> = None;
-            for c in chrs {
-                let Some(manip) = read_ptr(c + 0x58) else { continue };
-                if read_checked::<usize>(manip) != Some(base + RVA_COM_MANIP_VT) {
-                    continue;
-                }
-                let Some(p) = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)) else { continue };
-                let id = read_checked::<u16>(manip + 0x360).unwrap_or(0xffff);
-                let d = dist(p, hp);
-                if d < 30.0 && id != 0xffff && enemy_recs(mgr, id).is_some() && best.map(|b| d < b.0).unwrap_or(true) {
-                    best = Some((d, c, id, p));
+            let mut cands: Vec<(f32, f32, usize, u16, [f32; 3])> = Vec::new(); // (dist, moved, chr, id, pos)
+            {
+                let mut ph = ER_POSHIST.lock();
+                for c in chrs {
+                    let Some(manip) = read_ptr(c + 0x58) else { continue };
+                    if read_checked::<usize>(manip) != Some(base + RVA_COM_MANIP_VT) {
+                        continue;
+                    }
+                    let Some(p) = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)) else { continue };
+                    let id = read_checked::<u16>(manip + 0x360).unwrap_or(0xffff);
+                    let d = dist(p, hp);
+                    if d >= 30.0 || id == 0xffff || enemy_recs(mgr, id).is_none() {
+                        continue;
+                    }
+                    let q = ph.entry(c).or_default();
+                    q.push_back((now, p));
+                    while q.front().map(|e| now.duration_since(e.0).as_secs_f32() > 4.0).unwrap_or(false) {
+                        q.pop_front();
+                    }
+                    let moved = q.iter().map(|e| dist(e.1, p)).fold(0.0f32, f32::max);
+                    cands.push((d, moved, c, id, p));
                 }
             }
-            let Some((d, c, id, p)) = best else {
-                tracing::warn!("enemy replay: no enemy with a ComManipulator within 30 m");
-                ER_DONE.store(true, Ordering::Relaxed);
+            if since < 12.0 {
+                return;
+            }
+            cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let pick = cands.iter().find(|c| c.1 >= 1.0).copied().or_else(|| if since >= 25.0 { cands.first().copied() } else { None });
+            let Some((d, moved, c, id, p)) = pick else {
+                if since >= 25.0 {
+                    tracing::warn!("enemy replay: no enemy with a ComManipulator within 30 m");
+                    ER_DONE.store(true, Ordering::Relaxed);
+                }
                 return;
             };
             let Some(r) = enemy_recs(mgr, id) else { return };
@@ -3536,29 +3734,22 @@ fn enemy_replay_step() {
                 kind = ?read_checked::<u32>(c + 0x68),
                 id = format!("{id:#06x}"),
                 d,
-                "enemy replay: recording this enemy; the bot now circles it"
+                moved_4s = moved,
+                candidates = cands.len(),
+                "enemy replay: recording this enemy (taped every frame); the bot chases it"
             );
             *tgt = Some((c, r, now));
+            ER_REC_CHR.store(c, Ordering::Relaxed);
+            netai_hook_install();
         }
         let Some((c, r, ts)) = *tgt else { return };
+        drop(tgt);
         let t = ts.elapsed().as_secs_f32();
         let phase_rec = t < ER_REC_SECS;
         if phase_rec {
             let pe = phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a));
             *ER_CHASE.lock() = pe;
             er_click(pe.map(|e| dist(e, hp) < 2.5).unwrap_or(false));
-            let small: [u8; 0x1c] = RawPtr(r.small).read::<[u8; 0x1c]>();
-            let big = core::slice::from_raw_parts(r.big as *const u8, 0x158).to_vec();
-            let f = read_checked::<u16>(r.flags).unwrap_or(0);
-            let mut last = ER_LAST_BIG.lock();
-            let fresh = f & 8 != 0 || *last != big;
-            if f & 8 != 0 {
-                RawPtr(r.flags).write::<u16>(f & !8);
-            }
-            if fresh {
-                *last = big.clone();
-            }
-            ER_TAPE.lock().push((t, small, fresh.then_some(big)));
         } else {
             let tr = t - ER_REC_SECS;
             if ER_CHASE.lock().take().is_some() {
@@ -3593,37 +3784,6 @@ fn enemy_replay_step() {
                     "enemy replay: enemy now on a NetAI manipulator, playing the recording back"
                 );
             }
-            let tape = ER_TAPE.lock();
-            let f = read_checked::<u16>(r.flags).unwrap_or(0);
-            let mut nf = f;
-            // 0x1c: the newest recorded sample at or before tr, when the last one was consumed.
-            if f & 1 == 0 {
-                if let Some(e) = tape.iter().rev().find(|e| e.0 <= tr) {
-                    RawPtr(r.small).write::<[u8; 0x1c]>(e.1);
-                    nf = (nf & !0x100) | 1;
-                    ER_SMALL_W.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            // 0x158: in recorded order, one per consumption.
-            if f & 4 == 0 {
-                let mut cur = ER_BIG_CURSOR.load(Ordering::Relaxed);
-                while cur < tape.len() && tape[cur].2.is_none() {
-                    cur += 1;
-                }
-                if cur < tape.len() && tape[cur].0 <= tr {
-                    let big = tape[cur].2.as_ref().unwrap();
-                    core::ptr::copy_nonoverlapping(big.as_ptr(), r.big as *mut u8, 0x158);
-                    nf |= 4;
-                    ER_BIG_W.fetch_add(1, Ordering::Relaxed);
-                    cur += 1;
-                }
-                ER_BIG_CURSOR.store(cur, Ordering::Relaxed);
-            } else {
-                ER_BIG_SKIPPED.fetch_add(1, Ordering::Relaxed);
-            }
-            if nf != f {
-                RawPtr(r.flags).write::<u16>(nf);
-            }
         }
         let mut l = ER_LAST_LOG.lock();
         if l.map(|x| x.elapsed().as_secs_f32() >= 0.5).unwrap_or(true) {
@@ -3639,6 +3799,7 @@ fn enemy_replay_step() {
                 anim = ?anim_of(c),
                 words = er_anim_words(c),
                 flags = format!("{:#x}", read_checked::<u16>(r.flags).unwrap_or(0)),
+                tape = ER_TAPE.lock().len(),
                 u32s = hex(&big[0..(big[0x140].min(16) as usize) * 4]),
                 u64s = hex(&big[0x40..0x40 + (big[0x141].min(32) as usize) * 8]),
                 mode = u32::from_le_bytes([big[0x148], big[0x149], big[0x14a], big[0x14b]]),
@@ -4005,6 +4166,12 @@ static BOT_CENTER: Mutex<Option<[f32; 3]>> = Mutex::new(None);
 fn bot_steer(t: f32) -> Option<[f32; 2]> {
     bot_vector(t)?;
     let h = hero_pos()?;
+    // Runs 106-108: circling near a cliff edge, the Hero fell and died, and
+    // the save moved to the idol. In the replay test stand still until an
+    // enemy is chosen, then only chase it.
+    if *ENEMY_REPLAY && ER_CHASE.lock().is_none() {
+        return None;
+    }
     if let Some(e) = *ER_CHASE.lock() {
         let (dx, dz) = (e[0] - h[0], e[2] - h[2]);
         let len = (dx * dx + dz * dz).sqrt();
@@ -4111,6 +4278,26 @@ fn bot_autoload_step() {}
 
 /// Ticker: install on the Hero (again after a reload), start 5 s after the
 /// clone appears, and report at the end.
+/// `SEKIRO_COOP_BOT_NO_DEAD=1`: while the bot runs, set the game's debug
+/// flag PlayerNoDead (debug_flags + 0; the flag block has the Dark Souls III
+/// order, +13 AllNoUpdateAI was confirmed earlier), so a test fight or fall
+/// does not kill the Hero and move the test save to the idol.
+static BOT_NO_DEAD: Lazy<bool> = Lazy::new(|| std::env::var("SEKIRO_COOP_BOT_NO_DEAD").map(|v| v == "1").unwrap_or(false));
+static BOT_NO_DEAD_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const RVA_DEBUG_FLAGS: usize = 0x3d7a369;
+fn bot_no_dead(on: bool) {
+    if !*BOT_NO_DEAD || BOT_NO_DEAD_SET.load(Ordering::Relaxed) == on {
+        return;
+    }
+    let a = MODULE_BASE.load(Ordering::Relaxed) + RVA_DEBUG_FLAGS;
+    if !readable(a, 1) {
+        return;
+    }
+    unsafe { RawPtr(a).write::<u8>(on as u8) };
+    BOT_NO_DEAD_SET.store(on, Ordering::Relaxed);
+    tracing::info!(on, "bot: PlayerNoDead debug flag");
+}
+
 fn bot_step() {
     if !*BOT || BOT_DONE.load(Ordering::Relaxed) {
         return;
@@ -4141,6 +4328,7 @@ fn bot_step() {
             tracing::info!(manip = format!("{m:#x}"), "bot: installed on the Hero's manipulator");
         }
     }
+    bot_no_dead(true);
     let clone = DP_CLONE_ATTACHED.load(Ordering::Relaxed);
     {
         let mut st = BOT_START.lock();
@@ -4886,6 +5074,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         return;
     }
     dp_session_step();
+    com_manip_hook_step();
     enemy_probe_step();
     enemy_puppet_step();
     enemy_mirror_step();

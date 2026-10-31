@@ -10,6 +10,7 @@ rem Optional test settings (set them in the window before running this script):
 rem e.g. set SIM_EXTRA=--kill-handle 268451969 --kill-after-secs 70 (the simulator then reports that enemy dead)
 rem set ENEMY_HP_SYNC=1 to test enemy health sync
 rem set ENEMY_PROBE=6 to list the nearest enemies
+if "%ENEMY_PROBE%"=="" set ENEMY_PROBE=8
 set ME3=D:\dev\me3-0.11.0\bin\me3.exe
 set RUN=D:\dev\coop-run
 set BUILD=D:\dev\sekiro-coop\target\release
@@ -17,8 +18,8 @@ set BUILD=D:\dev\sekiro-coop\target\release
 echo Building mod and simulator...
 pushd D:\dev\sekiro-coop
 set MINHOOK_LIB_DIR=D:\dev\minhook-build
-cargo build --release -p sekiro-coop-dll -p peer-simulator
-if errorlevel 1 (popd & echo BUILD FAILED - send the error above to Claude & exit /b 1)
+cargo build --release -p sekiro-coop-dll -p peer-simulator > "%RUN%\build.log" 2>&1
+if errorlevel 1 (popd & type "%RUN%\build.log" & echo BUILD FAILED - send the error above to Claude & exit /b 1)
 popd
 
 copy /Y "%BUILD%\sekiro_coop.dll" "%RUN%\sekiro-coop-mods\" >nul || (echo DLL copy failed & exit /b 1)
@@ -105,7 +106,8 @@ set SEKIRO_COOP_ENEMY_PROBE=%ENEMY_PROBE%
 set SEKIRO_COOP_ENEMY_HP_SYNC=%ENEMY_HP_SYNC%
 set SEKIRO_COOP_ENEMY_PUPPET=
 set SEKIRO_COOP_ENEMY_MIRROR=
-set SEKIRO_COOP_ENEMY_REPLAY=
+set SEKIRO_COOP_ENEMY_REPLAY=1
+set SEKIRO_COOP_BOT_NO_DEAD=1
 set SEKIRO_COOP_ENEMY_SYNC=
 rem Test knob: sleep this many ms once a frame while the bot runs (14 gives ~38 fps).
 rem e.g. set BOT_FRAME_SLEEP_MS=14 before running for ~38 fps

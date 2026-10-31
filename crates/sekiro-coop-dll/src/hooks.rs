@@ -145,7 +145,10 @@ extern "system" fn applyeffect_detour(entity: usize, speffect_id: u32) -> u64 {
     // Enrich the log with the SpEffect row's `effectEndurance` if we
     // can resolve the param table live.  Costs a single param lookup
     // per call — SpEffect applications are rare (~60/min baseline).
-    let endurance = crate::global().and_then(|m| {
+    // Run 107 (owner: fps drops in fights): this lookup (module scan +
+    // param read) and an info line ran for every effect, dozens a second in
+    // a fight. Both now only when trace logging is on.
+    let endurance = if !tracing::enabled!(tracing::Level::TRACE) { None } else { crate::global().and_then(|m| {
         m.base_addrs.as_ref().map(|_| ()).and(
             sekiro_sdk_sys::memory::find_current_module("sekiro.exe")
                 .ok()
@@ -158,9 +161,9 @@ extern "system" fn applyeffect_detour(entity: usize, speffect_id: u32) -> u64 {
                     .map(|row| row.offset(0x8).read::<f32>())
                 }),
         )
-    });
+    }) };
 
-    tracing::info!(
+    tracing::trace!(
         entity = format!("{entity:#x}"),
         speffect_id,
         endurance = ?endurance,
@@ -185,7 +188,7 @@ extern "system" fn applyeffect_detour(entity: usize, speffect_id: u32) -> u64 {
 /// `(effect_list_ptr, speffect_id)` — per `SEKIRO_RAW.md §12`.
 extern "system" fn delete_effect_detour(effect_list: usize, speffect_id: u32) -> u64 {
     DELETE_EFFECT_CALLS.fetch_add(1, Ordering::Relaxed);
-    tracing::info!(
+    tracing::trace!(
         effect_list = format!("{effect_list:#x}"),
         speffect_id,
         "DeleteEffect"
