@@ -29,7 +29,8 @@ Step 3. Play
 Shared enemies (experimental, off by default)
   Both players run:  set SHARED_ENEMIES=1   and then play-steam.cmd as in step 3, in the same window.
   The host's enemies then move the same enemies in the client's game (the client's enemies stop
-  thinking for themselves while the host is near them). Hits and deaths are not shared yet.
+  thinking for themselves while the host is near them). Enemy health is shared too: a hit in
+  either game lowers it in both (deaths through that path are not tested yet).
   Only enemies of the same kind at the same place are taken over; the log says which.
 
 Saves

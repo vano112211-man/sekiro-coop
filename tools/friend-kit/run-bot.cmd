@@ -6,6 +6,10 @@ rem Argument 2 = the clone's character type for 0x9f5170 (default 0; remote phan
 rem The simulator mirrors the Hero's packets back with a delay; the clone is a kind-2 (Network) PlayerIns.
 rem Uses the test copy and the separate save coop-test.sl2. Optional argument: warp interval in ms.
 setlocal
+rem Optional test settings (set them in the window before running this script):
+rem e.g. set SIM_EXTRA=--kill-handle 268451969 --kill-after-secs 70 (the simulator then reports that enemy dead)
+rem set ENEMY_HP_SYNC=1 to test enemy health sync
+rem set ENEMY_PROBE=6 to list the nearest enemies
 set ME3=D:\dev\me3-0.11.0\bin\me3.exe
 set RUN=D:\dev\coop-run
 set BUILD=D:\dev\sekiro-coop\target\release
@@ -24,7 +28,7 @@ rem Stop any simulator left from an earlier run, then start a fresh one with a f
 taskkill /F /IM peer-simulator.exe >nul 2>&1
 ping -n 2 127.0.0.1 >nul
 del "%RUN%\peer.log" "%RUN%\peer.err" "%RUN%\sekiro-coop.log" 2>nul
-start "peer-simulator" /MIN cmd /c ""%BUILD%\peer-simulator.exe" --bind 127.0.0.1:28001 --peer 127.0.0.1:28000 --as client --mirror --mirror-delay-ms 250 --mirror-offset 5 > "%RUN%\peer.log" 2> "%RUN%\peer.err""
+start "peer-simulator" /MIN cmd /c ""%BUILD%\peer-simulator.exe" --bind 127.0.0.1:28001 --peer 127.0.0.1:28000 --as client --mirror --mirror-delay-ms 250 --mirror-offset 5 %SIM_EXTRA% > "%RUN%\peer.log" 2> "%RUN%\peer.err""
 ping -n 3 127.0.0.1 >nul
 tasklist /FI "IMAGENAME eq peer-simulator.exe" | find /I "peer-simulator.exe" >nul
 if errorlevel 1 (
@@ -97,7 +101,8 @@ set SEKIRO_COOP_DP_TRACE=
 set SEKIRO_COOP_BOT=1
 set SEKIRO_COOP_BOT_AUTOLOAD=1
 set SEKIRO_COOP_CLONE_OWN_PGD=2
-set SEKIRO_COOP_ENEMY_PROBE=
+set SEKIRO_COOP_ENEMY_PROBE=%ENEMY_PROBE%
+set SEKIRO_COOP_ENEMY_HP_SYNC=%ENEMY_HP_SYNC%
 set SEKIRO_COOP_ENEMY_PUPPET=
 set SEKIRO_COOP_ENEMY_MIRROR=
 set SEKIRO_COOP_ENEMY_REPLAY=

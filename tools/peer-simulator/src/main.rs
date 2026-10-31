@@ -62,6 +62,12 @@ fn main() -> ExitCode {
     // driven by the network can be checked with one game client.
     let mut mirror = false;
     let mut mirror_delay_ms: u64 = 500;
+    // `--kill-char-id <id> --kill-after-secs <s>`: from that time on, echo
+    // hp = 0 for enemies of that character id (tests HP sync to a death).
+    let mut kill_char_id: Option<u32> = None;
+    let mut kill_handle: Option<u32> = None;
+    let mut kill_after_secs: u64 = 30;
+    let started = Instant::now();
     let mut mirror_offset: f32 = 2.0;
 
     let args: Vec<String> = std::env::args().collect();
@@ -83,6 +89,9 @@ fn main() -> ExitCode {
             "--mirror" => { mirror = true; }
             "--mirror-delay-ms" => { i += 1; mirror_delay_ms = args[i].parse().unwrap_or(500); }
             "--mirror-offset" => { i += 1; mirror_offset = args[i].parse().unwrap_or(2.0); }
+            "--kill-char-id" => { i += 1; kill_char_id = args[i].parse().ok(); }
+            "--kill-handle" => { i += 1; kill_handle = args[i].parse().ok(); }
+            "--kill-after-secs" => { i += 1; kill_after_secs = args[i].parse().unwrap_or(30); }
             "-h" | "--help" => { usage(); return ExitCode::SUCCESS; }
             other => { eprintln!("unknown flag: {other}"); usage(); return ExitCode::FAILURE; }
         }
@@ -339,7 +348,13 @@ fn main() -> ExitCode {
             let perturbed: Vec<EnemyState> = last_rx_enemies
                 .iter()
                 .map(|e| EnemyState {
-                    hp: (e.hp - 1).max(0),
+                    hp: if (kill_char_id == Some(e.char_id as u32) || kill_handle == Some(e.handle as u32))
+                        && started.elapsed().as_secs() >= kill_after_secs
+                    {
+                        0
+                    } else {
+                        (e.hp - 1).max(0)
+                    },
                     ..*e
                 })
                 .collect();

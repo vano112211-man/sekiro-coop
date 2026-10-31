@@ -324,6 +324,11 @@ pub fn on_detach() {
     hook::remove_all();
 }
 
+static HP_WATCH: parking_lot::Mutex<Option<(u32, std::time::Instant)>> = parking_lot::Mutex::new(None);
+static ENEMY_HP_SYNC: once_cell::sync::Lazy<bool> = once_cell::sync::Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_ENEMY_HP_SYNC").map(|v| v == "1").unwrap_or(false)
+});
+
 fn steam_transport_requested() -> bool {
     std::env::var("SEKIRO_COOP_TRANSPORT").map(|v| v.eq_ignore_ascii_case("steam")).unwrap_or(false)
 }
@@ -808,7 +813,11 @@ pub fn on_frame() {
                 // sets up the canonical co-op ownership model (host
                 // owns the world; clients mirror).
                 let is_host = matches!(m.authority.peer, PeerId::Host);
-                if is_host && frame % 12 == 0 {
+                // SEKIRO_COOP_ENEMY_HP_SYNC=1 (shared enemies): both games send
+                // and both apply decrement-only, so a hit in either game
+                // counts in both. Players (character id 0) are left out.
+                let hp_sync = *ENEMY_HP_SYNC;
+                if (is_host || hp_sync) && frame % 12 == 0 {
                     let entries: Vec<(u32, usize)> = {
                         let reg = m.chrins_registry.lock();
                         reg.iter().map(|(h, p)| (*h, *p)).collect()
@@ -830,6 +839,9 @@ pub fn on_frame() {
                         };
                         // Skip entries whose state chain hasn't resolved
                         // yet (common right after entity spawn).
+                        if hp_sync && snap.char_id == 0 {
+                            continue;
+                        }
                         if let (Some(hp), Some(max_hp), Some(pos), Some(anim)) =
                             (snap.hp, snap.max_hp, snap.position, snap.animation_id)
                         {
@@ -994,7 +1006,8 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
                 let apply_enemy_hp = std::env::var("SEKIRO_COOP_APPLY_REMOTE")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
-                    && matches!(m.authority.peer, PeerId::Client);
+                    && matches!(m.authority.peer, PeerId::Client)
+                    || *ENEMY_HP_SYNC;
 
                 let reg = m.chrins_registry.lock();
                 let mut matched = 0usize;
@@ -1003,6 +1016,9 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
                 let mut unmatched = Vec::<u32>::new();
                 let mut diffs = Vec::<String>::new();
                 for ent in &entities {
+                    if *ENEMY_HP_SYNC && ent.char_id == 0 {
+                        continue;
+                    }
                     match reg.get(&ent.handle) {
                         Some(&local_ptr) if !puppet::chrins_alive(local_ptr, ent.handle) => {
                             read_failed += 1;
@@ -1032,6 +1048,10 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
                                         };
                                         if wrote {
                                             applied += 1;
+                                            if ent.hp <= 0 {
+                                                tracing::info!(handle = ent.handle, char_id = ent.char_id, local_hp, "enemy hp sync: the other game says this enemy is dead; wrote hp 0");
+                                                *HP_WATCH.lock() = Some((ent.handle, std::time::Instant::now()));
+                                            }
                                         }
                                     }
                                 }
@@ -1044,6 +1064,18 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
                                 unmatched.push(ent.handle);
                             }
                         }
+                    }
+                }
+                // After writing hp 0: follow that enemy for 15 s (does the
+                // game kill it, revive it, or leave it standing at 0?).
+                let watch = *HP_WATCH.lock();
+                if let Some((h, t0)) = watch.filter(|w| w.1.elapsed().as_secs() < 15) {
+                    match reg.get(&h) {
+                        Some(&p) if puppet::chrins_alive(p, h) => {
+                            let s = unsafe { sekiro_sdk_sys::live::chrins_snapshot(sekiro_sdk_sys::memory::RawPtr(p)) };
+                            tracing::info!(handle = h, secs = t0.elapsed().as_secs_f32(), hp = ?s.hp, anim = ?s.animation_id, pos = ?s.position, "enemy hp sync: watched enemy");
+                        }
+                        _ => tracing::info!(handle = h, secs = t0.elapsed().as_secs_f32(), "enemy hp sync: watched enemy is gone from the registry"),
                     }
                 }
                 drop(reg);
