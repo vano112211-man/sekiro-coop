@@ -2619,9 +2619,16 @@ fn bot_autoload_step() {
         let mut pid = 0u32;
         GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
         if pid != GetCurrentProcessId() {
+            static NOT_FRONT: AtomicU64 = AtomicU64::new(0);
+            if NOT_FRONT.fetch_add(1, Ordering::Relaxed) % 4 == 0 {
+                tracing::info!(front_pid = pid, "bot: autoload waits, the game window is not in front");
+            }
             return;
         }
         let n = BOT_AUTOLOAD_N.fetch_add(1, Ordering::Relaxed);
+        if n < 40 {
+            tracing::info!(n, key = if n % 2 == 0 { "Enter" } else { "E" }, "bot: autoload key press");
+        }
         let (vk, sc) = if n % 2 == 0 { (0x0Du8, 0x1Cu8) } else { (0x45u8, 0x12u8) }; // Enter, E
         keybd_event(vk, sc, 0, 0);
         std::thread::sleep(std::time::Duration::from_millis(60));
