@@ -3225,6 +3225,9 @@ unsafe extern "system" fn com_manip_update_detour(this: usize, ctrl: usize, a3: 
     if chr != 0 && chr == ER_REC_CHR.load(Ordering::Relaxed) {
         er_tape_frame();
     }
+    if chr != 0 && es_is_host() {
+        es_host_capture(chr);
+    }
     r
 }
 
@@ -3240,6 +3243,8 @@ static NETAI_UPD_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 unsafe extern "system" fn netai_update_detour(this: usize, dt: f32, ctrl: usize, a4: usize) -> usize {
     if this != 0 && this == ER_NETAI.load(Ordering::Relaxed) {
         er_play_frame();
+    } else if this != 0 && es_is_client() {
+        es_client_feed(this);
     }
     let mut o = NETAI_UPD_ORIG.load(Ordering::Acquire);
     while o == 0 {
@@ -3315,7 +3320,7 @@ static ENEMY_MIRROR: Lazy<bool> = Lazy::new(|| {
 });
 static EM_T0: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static EM_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct EnemyRecs {
     small: usize,
     big: usize,
@@ -3835,7 +3840,7 @@ static ES_OUTBOX: Mutex<Vec<(u64, u16, u32, Vec<u8>, Option<Vec<u8>>)>> = Mutex:
 static ES_SENT: Lazy<Mutex<std::collections::HashMap<u16, (u64, Vec<u8>)>>> =
     Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 /// Host side: enemies to send, refreshed every second: (chr, id).
-static ES_HOST_LIST: Mutex<(Option<std::time::Instant>, Vec<(usize, u16)>)> = Mutex::new((None, Vec::new()));
+static ES_HOST_LIST: Mutex<(Option<std::time::Instant>, Vec<(usize, u16, EnemyRecs, u32)>)> = Mutex::new((None, Vec::new()));
 static ES_FIRST_SEND: Mutex<Option<u64>> = Mutex::new(None);
 static ES_TX_SMALL: AtomicU64 = AtomicU64::new(0);
 static ES_TX_BIG: AtomicU64 = AtomicU64::new(0);
@@ -3848,6 +3853,7 @@ struct EsRemote {
     bigs: std::collections::VecDeque<Vec<u8>>,
     chr: usize,
     netai: usize,
+    recs: Option<EnemyRecs>,
     kind: u32,
     /// Our clock at the last packet for this id.
     last_rx_ms: u64,
@@ -3921,6 +3927,100 @@ unsafe fn es_enemies(mgr: usize, hp: [f32; 3], range: f32) -> Vec<(f32, usize, u
     out
 }
 
+fn es_pop_due(e: &mut EsRemote, render: i64) {
+    while e.queue.front().map(|q| (q.0 as i64) <= render).unwrap_or(false) {
+        let (_, small, big) = e.queue.pop_front().unwrap();
+        e.cur_small = Some(small);
+        if let Some(b) = big {
+            e.bigs.push_back(b);
+        }
+    }
+}
+
+/// Render time on the sender's clock, or None before the first packet or
+/// (loop test) before the switch.
+fn es_render_ms() -> Option<i64> {
+    let now = es_now_ms();
+    let looping = ENEMY_SYNC.as_str() == "loop";
+    if looping && !ES_FIRST_SEND.lock().map(|f| now >= f + ES_LOOP_SWITCH_MS).unwrap_or(false) {
+        return None;
+    }
+    let delay: i64 = if looping { ES_LOOP_SWITCH_MS as i64 } else { 150 };
+    Some(now as i64 - (*ES_MIN_OFF.lock())? - delay)
+}
+
+/// Host, from the ComManipulator hook right after the enemy's own update
+/// (records fresh): queue its records for the network. Per frame, so the
+/// 4 Hz ticker of busy scenes (run 107) no longer limits the rate.
+fn es_host_capture(chr: usize) {
+    let Some(hl) = ES_HOST_LIST.try_lock() else { return };
+    let Some(&(_, id, r, kind)) = hl.1.iter().find(|e| e.0 == chr) else { return };
+    drop(hl);
+    let now = es_now_ms();
+    unsafe {
+        let small = core::slice::from_raw_parts(r.small as *const u8, 0x1c).to_vec();
+        let big = core::slice::from_raw_parts(r.big as *const u8, 0x158).to_vec();
+        let f = *(r.flags as *const u16);
+        if f & 8 != 0 {
+            *(r.flags as *mut u16) = f & !8;
+        }
+        let mut sent = ES_SENT.lock();
+        let e = sent.entry(id).or_insert((0, Vec::new()));
+        let big_new = f & 8 != 0 || e.1 != big;
+        if !big_new && now < e.0 + ES_SMALL_EVERY_MS {
+            return;
+        }
+        e.0 = now;
+        ES_TX_SMALL.fetch_add(1, Ordering::Relaxed);
+        let big_out = if big_new {
+            e.1 = big.clone();
+            ES_TX_BIG.fetch_add(1, Ordering::Relaxed);
+            Some(big)
+        } else {
+            None
+        };
+        drop(sent);
+        let mut ob = ES_OUTBOX.lock();
+        if ob.len() < 512 {
+            ob.push((now, id, kind, small, big_out));
+        }
+        drop(ob);
+        ES_FIRST_SEND.lock().get_or_insert(now);
+    }
+}
+
+/// Client, from the NetAI hook right before NetAI reads the records.
+fn es_client_feed(netai: usize) {
+    let render = es_render_ms();
+    let Some(mut rem) = ES_REMOTE.try_lock() else { return };
+    let Some(e) = rem.values_mut().find(|e| e.netai == netai) else { return };
+    if let Some(render) = render {
+        es_pop_due(e, render);
+    }
+    let Some(r) = e.recs else { return };
+    unsafe {
+        let f = *(r.flags as *const u16);
+        let mut nf = f;
+        if f & 1 == 0 {
+            if let Some(sm) = &e.cur_small {
+                core::ptr::copy_nonoverlapping(sm.as_ptr(), r.small as *mut u8, 0x1c);
+                nf = (nf & !0x100) | 1;
+                e.small_w += 1;
+            }
+        }
+        if f & 4 == 0 {
+            if let Some(b) = e.bigs.pop_front() {
+                core::ptr::copy_nonoverlapping(b.as_ptr(), r.big as *mut u8, 0x158);
+                nf |= 4;
+                e.big_w += 1;
+            }
+        }
+        if nf != f {
+            *(r.flags as *mut u16) = nf;
+        }
+    }
+}
+
 fn enemy_sync_step() {
     if ENEMY_SYNC.is_empty() {
         return;
@@ -3939,41 +4039,17 @@ fn enemy_sync_step() {
             if !stop {
                 let mut hl = ES_HOST_LIST.lock();
                 if hl.0.map(|t| t.elapsed().as_secs_f32() >= 1.0).unwrap_or(true) {
-                    let mut list: Vec<(usize, u16)> = es_enemies(mgr, hp, ES_RANGE).into_iter().map(|e| (e.1, e.2)).collect();
+                    let mut list: Vec<(usize, u16, EnemyRecs, u32)> = es_enemies(mgr, hp, ES_RANGE)
+                        .into_iter()
+                        .filter_map(|e| Some((e.1, e.2, enemy_recs(mgr, e.2)?, read_checked::<u32>(e.1 + 0x68).unwrap_or(0))))
+                        .collect();
                     if looping {
                         list.truncate(1);
                     }
                     *hl = (Some(std::time::Instant::now()), list);
                 }
-                let mut sent = ES_SENT.lock();
-                let mut ob = ES_OUTBOX.lock();
-                for &(c, id) in hl.1.iter() {
-                    let Some(r) = enemy_recs(mgr, id) else { continue };
-                    let small = core::slice::from_raw_parts(r.small as *const u8, 0x1c).to_vec();
-                    let big = core::slice::from_raw_parts(r.big as *const u8, 0x158).to_vec();
-                    let f = read_checked::<u16>(r.flags).unwrap_or(0);
-                    if f & 8 != 0 {
-                        RawPtr(r.flags).write::<u16>(f & !8);
-                    }
-                    let e = sent.entry(id).or_insert((0, Vec::new()));
-                    let big_new = f & 8 != 0 || e.1 != big;
-                    if !big_new && now < e.0 + ES_SMALL_EVERY_MS {
-                        continue;
-                    }
-                    e.0 = now;
-                    ES_TX_SMALL.fetch_add(1, Ordering::Relaxed);
-                    let big_out = if big_new {
-                        e.1 = big.clone();
-                        ES_TX_BIG.fetch_add(1, Ordering::Relaxed);
-                        Some(big)
-                    } else {
-                        None
-                    };
-                    if ob.len() < 512 {
-                        ob.push((now, id, read_checked::<u32>(c + 0x68).unwrap_or(0), small, big_out));
-                    }
-                    ES_FIRST_SEND.lock().get_or_insert(now);
-                }
+            } else {
+                ES_HOST_LIST.lock().1.clear();
             }
         }
         // ---- client: drive enemies from received records
@@ -3988,12 +4064,10 @@ fn enemy_sync_step() {
                     let mut rem = ES_REMOTE.lock();
                     let mut ids_missing = Vec::new();
                     for (id, e) in rem.iter_mut() {
-                        while e.queue.front().map(|q| (q.0 as i64) <= render).unwrap_or(false) {
-                            let (_, small, big) = e.queue.pop_front().unwrap();
-                            e.cur_small = Some(small);
-                            if let Some(b) = big {
-                                e.bigs.push_back(b);
-                            }
+                        // Once the enemy is driven, the NetAI hook takes the
+                        // records out of the queue every frame (es_client_feed).
+                        if e.netai == 0 {
+                            es_pop_due(e, render);
                         }
                         if e.cur_small.is_none() {
                             continue;
@@ -4045,29 +4119,11 @@ fn enemy_sync_step() {
                                 continue;
                             }
                             let Some(na) = install_netai(c, *id) else { continue };
+                            netai_hook_install();
                             e.chr = c;
+                            e.recs = enemy_recs(mgr, *id);
                             e.netai = na;
                             tracing::info!(id = format!("{id:#06x}"), chr = format!("{c:#x}"), kind = ?read_checked::<u32>(c + 0x68), "enemy sync: enemy now driven by the host's records");
-                        }
-                        let Some(r) = enemy_recs(mgr, *id) else { continue };
-                        let f = read_checked::<u16>(r.flags).unwrap_or(0);
-                        let mut nf = f;
-                        if f & 1 == 0 {
-                            if let Some(sm) = &e.cur_small {
-                                core::ptr::copy_nonoverlapping(sm.as_ptr(), r.small as *mut u8, 0x1c);
-                                nf = (nf & !0x100) | 1;
-                                e.small_w += 1;
-                            }
-                        }
-                        if f & 4 == 0 {
-                            if let Some(b) = e.bigs.pop_front() {
-                                core::ptr::copy_nonoverlapping(b.as_ptr(), r.big as *mut u8, 0x158);
-                                nf |= 4;
-                                e.big_w += 1;
-                            }
-                        }
-                        if nf != f {
-                            RawPtr(r.flags).write::<u16>(nf);
                         }
                     }
                     if !ids_missing.is_empty() {
@@ -4169,7 +4225,7 @@ fn bot_steer(t: f32) -> Option<[f32; 2]> {
     // Runs 106-108: circling near a cliff edge, the Hero fell and died, and
     // the save moved to the idol. In the replay test stand still until an
     // enemy is chosen, then only chase it.
-    if *ENEMY_REPLAY && ER_CHASE.lock().is_none() {
+    if (*ENEMY_REPLAY || !ENEMY_SYNC.is_empty()) && ER_CHASE.lock().is_none() {
         return None;
     }
     if let Some(e) = *ER_CHASE.lock() {
@@ -4293,9 +4349,15 @@ fn bot_no_dead(on: bool) {
     if !readable(a, 1) {
         return;
     }
-    unsafe { RawPtr(a).write::<u8>(on as u8) };
+    // Run 110: PlayerNoDead alone did not keep the Hero alive in a fight.
+    // 0x9f2bf0 confirms +0 (player no-dead, +16 all no-dead); its neighbour
+    // 0x9f2c70 reads +1 for the player (+17 for all), i.e. no-damage. Set both.
+    unsafe {
+        RawPtr(a).write::<u8>(on as u8);
+        RawPtr(a + 1).write::<u8>(on as u8);
+    }
     BOT_NO_DEAD_SET.store(on, Ordering::Relaxed);
-    tracing::info!(on, "bot: PlayerNoDead debug flag");
+    tracing::info!(on, "bot: PlayerNoDead + PlayerNoDamage debug flags");
 }
 
 fn bot_step() {
