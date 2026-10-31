@@ -2712,6 +2712,112 @@ pub fn note_remote_appearance(bytes: Vec<u8>) {
     tracing::info!(n, ?ids, "own pgd: remote appearance applied to the clone (ChrAsm ids)");
 }
 
+// ---------------------------------------------------------------- enemy net probe
+
+/// Stage 2 scouting (offline RE, 2026-10-31): WorldChrMan+0x630 is a
+/// per-frame enemy net-sync manager (0xa1d2d0). Characters are addressed by a
+/// u16 net id = (set << 11) | slot; each set (mgr + 0x10 + set*8, count at
+/// mgr+8) holds per-slot records: +0x20 stride 0x1c (written by
+/// ComManipulator vt[11] 0x7e54f0 via 0xa4b7e0 -> 0xa1bd90, id at
+/// ComManipulator+0x360), +0x28 stride 0x158 (packet 0x46, read by
+/// NetAIManipulator via 0xa4b710/0xa4b740), +0x38 u16 flags. Senders and
+/// readers return early unless the session is "online".
+/// `SEKIRO_COOP_ENEMY_PROBE=1`: every 3 s, for the 6 nearest registered
+/// characters, log manipulator class, net id, and whether their 0x1c and
+/// 0x158 records exist and change, i.e. whether the owner side fills them
+/// offline.
+static ENEMY_PROBE: Lazy<bool> = Lazy::new(|| {
+    std::env::var("SEKIRO_COOP_ENEMY_PROBE").map(|v| v == "1").unwrap_or(false)
+});
+static ENEMY_PROBE_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static ENEMY_PROBE_PREV: Mutex<Vec<(usize, Vec<u8>, Vec<u8>)>> = Mutex::new(Vec::new());
+const RVA_COM_MANIP_VT: usize = 0x29d2fb8;
+const RVA_NETAI_MANIP_VT: usize = 0x29d3eb8;
+
+fn enemy_probe_step() {
+    if !*ENEMY_PROBE {
+        return;
+    }
+    {
+        let mut l = ENEMY_PROBE_LAST.lock();
+        if l.map(|t| t.elapsed() < std::time::Duration::from_secs(3)).unwrap_or(false) {
+            return;
+        }
+        *l = Some(std::time::Instant::now());
+    }
+    let Some(m) = crate::global() else { return };
+    let Some(hp) = hero_pos() else { return };
+    let base = MODULE_BASE.load(Ordering::Relaxed);
+    let chrs: Vec<usize> = m.chrins_registry.lock().values().copied().collect();
+    let mut near: Vec<(f32, usize)> = chrs
+        .into_iter()
+        .filter_map(|c| unsafe { phys_pos_addr(c).and_then(|a| read_checked::<[f32; 3]>(a)).map(|p| (dist(p, hp), c)) })
+        .collect();
+    near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    unsafe {
+        let Some(wcm) = read_ptr(base + RVA_WORLD_CHR_MAN) else { return };
+        let mgr = read_ptr(wcm + 0x630);
+        let sets = mgr.and_then(|g| read_checked::<i32>(g + 8));
+        let mut rows = Vec::new();
+        let mut prev = ENEMY_PROBE_PREV.lock();
+        let mut next = Vec::new();
+        for (d, c) in near.into_iter().take(6) {
+            let manip = read_ptr(c + 0x58).unwrap_or(0);
+            let mvt = read_checked::<usize>(manip).map(|v| v.wrapping_sub(base)).unwrap_or(0);
+            let kind = match mvt {
+                RVA_COM_MANIP_VT => "Com",
+                RVA_NETAI_MANIP_VT => "NetAI",
+                RVA_PAD_MANIP_VT => "Pad",
+                0x29d4530 => "Network",
+                _ => "?",
+            };
+            let id = read_checked::<u16>(manip + 0x360).unwrap_or(0xffff);
+            let (mut small, mut big, mut flags) = (Vec::new(), Vec::new(), None);
+            if let Some(g) = mgr {
+                let set = (id >> 11) as i64;
+                let slot = (id & 0x7ff) as usize;
+                if id != 0xffff && set < sets.unwrap_or(0) as i64 {
+                    if let Some(sp) = read_ptr(g + 0x10 + set as usize * 8) {
+                        let n = read_checked::<i32>(sp + 0x10).unwrap_or(0) as usize;
+                        if slot < n {
+                            if let Some(a) = read_ptr(sp + 0x20) {
+                                let r = a + slot * 0x1c;
+                                if readable(r, 0x1c) {
+                                    small = core::slice::from_raw_parts(r as *const u8, 0x1c).to_vec();
+                                }
+                            }
+                            if let Some(a) = read_ptr(sp + 0x28) {
+                                let r = a + slot * 0x158;
+                                if readable(r, 0x158) {
+                                    big = core::slice::from_raw_parts(r as *const u8, 0x158).to_vec();
+                                }
+                            }
+                            flags = read_ptr(sp + 0x38).and_then(|a| read_checked::<u16>(a + slot * 2));
+                        }
+                    }
+                }
+            }
+            let (sch, bch) = match prev.iter().find(|e| e.0 == c) {
+                Some((_, ps, pb)) => (ps != &small, pb != &big),
+                None => (false, false),
+            };
+            let hex = |v: &[u8], n: usize| v.iter().take(n).map(|b| format!("{b:02x}")).collect::<String>();
+            rows.push(format!(
+                "chr {c:#x} d={d:.1} chr_id={:?} manip={kind}({mvt:#x}) id={id:#06x} flags={flags:?} rec1c={} changed={sch} rec158[0..32]={} changed={bch}",
+                read_checked::<u32>(c + 0x68),
+                hex(&small, 0x1c),
+                hex(&big, 32)
+            ));
+            next.push((c, small, big));
+        }
+        *prev = next;
+        tracing::info!(mgr = ?mgr.map(|v| format!("{v:#x}")), sets = ?sets, "enemy probe");
+        for r in rows {
+            tracing::info!("enemy probe: {r}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------- test bot
 
 /// In-game test bot (coop-anything rule 11: test with bots, not people).
@@ -3592,6 +3698,7 @@ pub fn on_tick(m: &crate::Mod, frame: u64) {
         return;
     }
     dp_session_step();
+    enemy_probe_step();
     bot_autoload_step();
     bot_step();
     clone_diff_step();
