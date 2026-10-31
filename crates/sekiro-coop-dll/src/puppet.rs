@@ -2238,6 +2238,8 @@ static DP_BUF_DELAY: Lazy<f32> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_DELAY_BUF_MS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(120.0) / 1000.0
 });
 static DP_SMOOTH_HELD: AtomicU64 = AtomicU64::new(0);
+static DP_OFFS: Mutex<std::collections::VecDeque<i64>> = Mutex::new(std::collections::VecDeque::new());
+static DP_RENDER_DELAY: Mutex<f32> = Mutex::new(0.0);
 static DP_KEEP_Y: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_KEEP_Y").map(|v| v != "0").unwrap_or(true)
 });
@@ -2258,6 +2260,13 @@ fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Opti
         };
         *mo = Some(m);
         drop(mo);
+        {
+            let mut r = DP_OFFS.lock();
+            r.push_back(off);
+            while r.len() > 64 {
+                r.pop_front();
+            }
+        }
         let at = *DP_T0 + std::time::Duration::from_millis((sender_ms as i64 + m).max(0) as u64);
         let mut h = DP_HIST.lock();
         // Keep the history ordered by time (late packets inserted in place).
@@ -2281,7 +2290,21 @@ fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Opti
         return None; // sender went quiet
     }
     let h = DP_HIST.lock();
-    let render = now.checked_sub(std::time::Duration::from_secs_f32(*DP_BUF_DELAY))?;
+    // Run 79: the buffer was dry 1446 of 1762 times; samples lagged the
+    // fastest one by up to ~300 ms (the sender's outbox is drained by the
+    // ~10-60 Hz ticker, plus the link). Render that much behind: the 90th
+    // percentile of (offset - min offset) over the last 64 packets plus
+    // 40 ms, at least DP_DELAY_BUF_MS and at most 600 ms.
+    let delay = {
+        let r = DP_OFFS.lock();
+        let m = (*DP_MIN_OFF.lock()).unwrap_or(0);
+        let mut v: Vec<i64> = r.iter().map(|o| o - m).collect();
+        v.sort_unstable();
+        let p90 = v.get(v.len() * 9 / 10).copied().unwrap_or(0) as f32 / 1000.0;
+        (p90 + 0.04).clamp(*DP_BUF_DELAY, 0.6)
+    };
+    *DP_RENDER_DELAY.lock() = delay;
+    let render = now.checked_sub(std::time::Duration::from_secs_f32(delay))?;
     let mut pos = h.back()?.1;
     let mut held = true;
     for w in h.iter().collect::<Vec<_>>().windows(2) {
@@ -2531,6 +2554,7 @@ unsafe fn dp_on_area_change(hero: usize) {
     *DP_SMOOTH_PREV.lock() = None;
     DP_HIST.lock().clear();
     *DP_MIN_OFF.lock() = None;
+    DP_OFFS.lock().clear();
     *DP_CLONE_LAST.lock() = None;
     if alive {
         let warped = hero_pos().map(|p| native_warp(clone, [p[0] + 1.5, p[1], p[2]], [0.0; 4]));
@@ -2975,6 +2999,7 @@ fn bot_report() {
         mean_clone_hero_gap_m = mean_gap,
         smooth_ms = *DP_SMOOTH_MS,
         buf_delay_ms = *DP_BUF_DELAY * 1000.0,
+        render_delay_ms = *DP_RENDER_DELAY.lock() * 1000.0,
         "bot: summary"
     );
     // Context of the first 12 clone jumps: the 3 samples before and the jump.
