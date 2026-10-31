@@ -1,4 +1,6 @@
 @echo off
+rem Everything below also goes to make-kit.log next to this script.
+if not "%~1"=="logged" (call "%~f0" logged > "%~dp0make-kit.log" 2>&1 & exit /b)
 rem Builds the friend kit: D:\dev\coop-kit\sekiro-coop-friend.zip (DLL, me3 profile, launcher, README). No game files.
 setlocal
 set SRC=D:\dev\sekiro-coop
