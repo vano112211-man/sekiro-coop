@@ -2011,8 +2011,18 @@ static DP_CLONE_ATTACHED: AtomicUsize = AtomicUsize::new(0);
 /// (type, bytes). Run 60: the Hero sends type 1 (~15/s) and type 7 (~2.5/s);
 /// dropping type 7 and answering every Receive with type-1 data lost the
 /// clone's animations, so everything is kept per type now.
-static DP_OUTBOX: Mutex<Vec<(u32, Vec<u8>)>> = Mutex::new(Vec::new());
-static DP_INBOX: Mutex<std::collections::VecDeque<(std::time::Instant, u32, Vec<u8>)>> =
+/// (type, bytes, sender ms). Run 74: the bot's jump log showed target steps
+/// of 0.4-0.9 m per 33 ms (12-27 m/s for a 5 m/s run): the jitter buffer
+/// timed packets by local arrival, and they arrive in clumps. Each packet now
+/// carries the sender's clock (ms since its DP_T0), sent as DpRegular.frame.
+static DP_OUTBOX: Mutex<Vec<(u32, Vec<u8>, u64)>> = Mutex::new(Vec::new());
+static DP_T0: Lazy<std::time::Instant> = Lazy::new(std::time::Instant::now);
+fn dp_now_ms() -> u64 {
+    DP_T0.elapsed().as_millis() as u64
+}
+/// Smallest (local arrival ms - sender ms) seen: maps sender time to ours.
+static DP_MIN_OFF: Mutex<Option<i64>> = Mutex::new(None);
+static DP_INBOX: Mutex<std::collections::VecDeque<(std::time::Instant, u32, Vec<u8>, u64)>> =
     Mutex::new(std::collections::VecDeque::new());
 /// Run 61: the second packet type is above 15 (it showed up only in the
 /// clamped bucket), so types are counted by value: (type, count, last size).
@@ -2124,14 +2134,14 @@ unsafe extern "system" fn dp_fake_send(_this: usize, buf: *const u8, size: u32, 
     }
     if *DP_LOOPBACK {
         let mut q = DP_INBOX.lock();
-        q.push_back((std::time::Instant::now() + *DP_DELAY, ty, bytes.clone()));
+        q.push_back((std::time::Instant::now() + *DP_DELAY, ty, bytes.clone(), dp_now_ms()));
         while q.len() > 1200 {
             q.pop_front();
         }
     }
     let mut o = DP_OUTBOX.lock();
     if o.len() < 128 {
-        o.push((ty, bytes));
+        o.push((ty, bytes, dp_now_ms()));
     }
     0
 }
@@ -2176,10 +2186,10 @@ unsafe extern "system" fn dp_fake_recv(_this: usize, out: *mut u64, desc: *const
         } else {
             std::time::Duration::ZERO
         };
-        let i = q.iter().position(|(due, t, _)| *t == ty && *due + hold <= now);
-        i.and_then(|i| q.remove(i)).map(|(_, _, b)| b)
+        let i = q.iter().position(|(due, t, _, _)| *t == ty && *due + hold <= now);
+        i.and_then(|i| q.remove(i)).map(|(_, _, b, ms)| (b, ms))
     };
-    let pkt = if ty == 1 && *DP_SMOOTH { dp_smooth_next(pkt, now) } else { pkt };
+    let pkt = if ty == 1 && *DP_SMOOTH { dp_smooth_next(pkt, now) } else { pkt.map(|(b, _)| b) };
     let pkt = match pkt {
         Some(p) if ty == 1 && *DP_LEAD > 1.0 => Some(dp_lead(p)),
         other => other,
@@ -2235,11 +2245,24 @@ static DP_SYNC_OTHERS: Lazy<bool> = Lazy::new(|| {
     std::env::var("SEKIRO_COOP_DP_SYNC_OTHERS").map(|v| v != "0").unwrap_or(true)
 });
 
-fn dp_smooth_next(real: Option<Vec<u8>>, now: std::time::Instant) -> Option<Vec<u8>> {
-    if let Some(r) = real {
+fn dp_smooth_next(real: Option<(Vec<u8>, u64)>, now: std::time::Instant) -> Option<Vec<u8>> {
+    if let Some((r, sender_ms)) = real {
         let Some(p) = dp_pos_of(&r) else { return Some(r) };
+        // Time the sample by the sender's clock mapped onto ours.
+        let local_ms = now.duration_since(*DP_T0).as_millis() as i64;
+        let off = local_ms - sender_ms as i64;
+        let mut mo = DP_MIN_OFF.lock();
+        let m = match *mo {
+            Some(m) if m <= off => m,
+            _ => off,
+        };
+        *mo = Some(m);
+        drop(mo);
+        let at = *DP_T0 + std::time::Duration::from_millis((sender_ms as i64 + m).max(0) as u64);
         let mut h = DP_HIST.lock();
-        h.push_back((now, p));
+        // Keep the history ordered by time (late packets inserted in place).
+        let pos_i = h.iter().position(|e| e.0 > at).unwrap_or(h.len());
+        h.insert(pos_i, (at, p));
         while h.len() > 32 {
             h.pop_front();
         }
@@ -2494,6 +2517,7 @@ unsafe fn dp_on_area_change(hero: usize) {
     *DP_SMOOTH_CUR.lock() = None;
     *DP_SMOOTH_PREV.lock() = None;
     DP_HIST.lock().clear();
+    *DP_MIN_OFF.lock() = None;
     *DP_CLONE_LAST.lock() = None;
     if alive {
         let warped = hero_pos().map(|p| native_warp(clone, [p[0] + 1.5, p[1], p[2]], [0.0; 4]));
@@ -2528,7 +2552,7 @@ unsafe fn dp_attach_clone(chr: usize) {
 }
 
 /// Packets the Hero sent since the last call, as (type, bytes), for the network.
-pub fn dp_take_outbox() -> Vec<(u32, Vec<u8>)> {
+pub fn dp_take_outbox() -> Vec<(u32, Vec<u8>, u64)> {
     if !*DP_SESSION {
         return Vec::new();
     }
@@ -2536,12 +2560,12 @@ pub fn dp_take_outbox() -> Vec<(u32, Vec<u8>)> {
 }
 
 /// A packet from the remote player: queue it for the clone.
-pub fn dp_note_remote(ty: u32, bytes: Vec<u8>) {
+pub fn dp_note_remote(ty: u32, bytes: Vec<u8>, sender_ms: u64) {
     if bytes.len() > DP_MAX {
         return;
     }
     let mut q = DP_INBOX.lock();
-    q.push_back((std::time::Instant::now(), ty, bytes));
+    q.push_back((std::time::Instant::now(), ty, bytes, sender_ms));
     while q.len() > 1200 {
         q.pop_front();
     }

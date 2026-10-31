@@ -776,10 +776,12 @@ pub fn on_frame() {
                             &PacketBody::ManipState { frame, bytes },
                         );
                     }
-                    for (ty, bytes) in puppet::dp_take_outbox() {
+                    for (ty, bytes, sent_ms) in puppet::dp_take_outbox() {
+                        // `frame` carries the sender's ms clock for the
+                        // receiver's jitter buffer.
                         let _ = sess.send_unreliable(
                             PacketType::State,
-                            &PacketBody::DpRegular { frame, ty, bytes },
+                            &PacketBody::DpRegular { frame: sent_ms, ty, bytes },
                         );
                     }
                 }
@@ -938,8 +940,8 @@ fn apply_incoming(m: &Mod, body: PacketBody) {
         PacketBody::ManipState { bytes, .. } => {
             puppet::note_remote_manip(bytes);
         }
-        PacketBody::DpRegular { ty, bytes, .. } => {
-            puppet::dp_note_remote(ty, bytes);
+        PacketBody::DpRegular { frame, ty, bytes } => {
+            puppet::dp_note_remote(ty, bytes, frame);
         }
         PacketBody::BridgeEvents { frame, events } => {
             tracing::info!(

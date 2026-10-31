@@ -155,7 +155,7 @@ fn main() -> ExitCode {
     let mut manip_history: std::collections::VecDeque<(Instant, Vec<u8>)> =
         std::collections::VecDeque::new();
     // Mirrored DP_REGULAR packets, replayed with the same delay.
-    let mut dp_history: std::collections::VecDeque<(Instant, u32, Vec<u8>)> =
+    let mut dp_history: std::collections::VecDeque<(Instant, u32, Vec<u8>, u64)> =
         std::collections::VecDeque::new();
 
     loop {
@@ -226,11 +226,12 @@ fn main() -> ExitCode {
                     &PacketBody::ManipState { frame, bytes },
                 );
             }
-            while dp_history.front().map(|(t, _, _)| *t <= cutoff).unwrap_or(false) {
-                if let Some((_, ty, bytes)) = dp_history.pop_front() {
+            while dp_history.front().map(|(t, _, _, _)| *t <= cutoff).unwrap_or(false) {
+                if let Some((_, ty, bytes, sent)) = dp_history.pop_front() {
+                    // Keep the sender's clock (`frame`) for its jitter buffer.
                     let _ = session.send_unreliable(
                         PacketType::State,
-                        &PacketBody::DpRegular { frame, ty, bytes },
+                        &PacketBody::DpRegular { frame: sent, ty, bytes },
                     );
                 }
             }
@@ -280,8 +281,8 @@ fn main() -> ExitCode {
                 PacketBody::ManipState { bytes, .. } if mirror => {
                     manip_history.push_back((Instant::now(), bytes));
                 }
-                PacketBody::DpRegular { ty, bytes, .. } if mirror => {
-                    dp_history.push_back((Instant::now(), ty, bytes));
+                PacketBody::DpRegular { frame: sent, ty, bytes } if mirror => {
+                    dp_history.push_back((Instant::now(), ty, bytes, sent));
                 }
                 PacketBody::PlayerSnapshot(s) => {
                     if mirror {
